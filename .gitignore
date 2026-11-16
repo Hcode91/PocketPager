@@ -1,0 +1,13 @@
+tools/ppcli
+*.o
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+.idea/
+*.iml
+# never commit RIM firmware or SDK files
+*.bin
+*.dll
+*.rar
