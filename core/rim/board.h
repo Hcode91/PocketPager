@@ -35,6 +35,12 @@ enum {
 };
 void pp_key(PPBoard *b, int key, int down);
 
+/* Serial ports (0 = COM1 0x3F8, 1 = COM2 0x2F8 = cradle). tx is called for
+ * every byte the device sends; pp_serial_rx queues bytes for the device. */
+void pp_serial_set_host(PPBoard *b, int n, void (*tx)(void *, uint8_t), void *ctx);
+int pp_serial_rx(PPBoard *b, int n, const uint8_t *data, int len);
+int pp_serial_rx_space(PPBoard *b, int n);
+
 /* Debug */
 void pp_board_status(PPBoard *b, char *buf, size_t len);
 uint64_t pp_board_instructions(PPBoard *b);

@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -24,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private lateinit var logScroll: ScrollView
+    private lateinit var logPanel: LinearLayout
     private var emulator: Emulator? = null
     private val ui = Handler(Looper.getMainLooper())
     private val logBuf = StringBuilder()
@@ -48,9 +50,7 @@ class MainActivity : Activity() {
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         bar.addView(toolButton("Load OS") { pickOs() }, weight())
         bar.addView(toolButton("Reset") { emulator?.resetRequested = true }, weight())
-        bar.addView(toolButton("Log") {
-            logScroll.visibility = if (logScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }, weight())
+        bar.addView(toolButton("Log") { showLog(true) }, weight())
         root.addView(bar)
 
         lcd = LcdView(this)
@@ -89,20 +89,31 @@ class MainActivity : Activity() {
         last.addView(key("SHIFT", Native.KEY_SHIFT), weight(1.4f))
         root.addView(last)
 
+        // Full-screen log overlay
         logView = TextView(this).apply {
             setTextColor(Color.rgb(0x7F, 0xD9, 0x8C))
             textSize = 10f
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
         }
-        logScroll = ScrollView(this).apply {
-            addView(logView)
+        logScroll = ScrollView(this).apply { addView(logView) }
+        logPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.argb(0xF2, 0, 0, 0))
             visibility = View.GONE
-            setBackgroundColor(Color.BLACK)
+            val top = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            top.addView(toolButton("Close log") { showLog(false) }, weight())
+            top.addView(toolButton("Clear") { logBuf.setLength(0); logView.text = "" }, weight())
+            addView(top)
+            addView(logScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         }
-        root.addView(logScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        setContentView(root)
+        val frame = FrameLayout(this)
+        frame.addView(ScrollView(this).apply { addView(root) })
+        frame.addView(logPanel, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        setContentView(frame)
         ui.post(tick)
     }
 
@@ -152,11 +163,21 @@ class MainActivity : Activity() {
                 logBuf.append(newLog)
                 if (logBuf.length > 60000) logBuf.delete(0, logBuf.length - 50000)
                 logView.text = logBuf
-                if (logScroll.visibility == View.VISIBLE)
+                if (logPanel.visibility == View.VISIBLE)
                     logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
             }
             ui.postDelayed(this, 300)
         }
+    }
+
+    private fun showLog(show: Boolean) {
+        logPanel.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (logPanel.visibility == View.VISIBLE) showLog(false) else super.onBackPressed()
     }
 
     private fun showWelcome() {

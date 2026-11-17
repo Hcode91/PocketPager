@@ -4,7 +4,8 @@ An Android emulator for the RIM 850, 857, 950 and 957 two-way pagers
 (Intel 386EX based, OS 2.x). It emulates the hardware and boots the real
 OS image.
 
-**Status: early.** The 957 OS boots to its idle loop with the LCD running.
+**Status: early.** The 957/950/850 OS images boot fully: radio DSP (faked),
+both flash chips, RTC, LCD and the cradle serial port are all emulated.
 Apps aren't loaded into flash yet, so the screen stays blank.
 See [docs/HARDWARE.md](docs/HARDWARE.md).
 
@@ -30,4 +31,9 @@ No RIM firmware or software is included in this repository.
   * `PP_DUMP=file` writes the 64 MB address space at exit
   * `PP_PORTLOG=<hex port>` logs every access to that port group
   * `PP_FLASHLOG=1` logs flash commands
+  * `PP_BP=addr,addr` logs registers at addresses (with `PP_TRACE`)
+  * `PP_DSPLOG=1` logs radio DSP traffic, `PP_UARTLOG=1` UART register access
+  * `PP_SERIAL=1` runs in real time with COM2 on a pseudo-terminal
+    (`PP_PTYLINK=/tmp/pp_com` makes a stable link to it, e.g. for Wine's COM1)
+  * `PP_SAVEFLASH=file` saves the OS/app flash chip at exit
 * `android/` – the app (Kotlin + JNI).

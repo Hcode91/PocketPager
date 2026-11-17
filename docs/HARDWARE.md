@@ -26,11 +26,24 @@ by running them in the emulator and tracing what they touch.
 | Linear | Physical | What |
 |---|---|---|
 | 0x00400000–0x0060BFFF | same | RAM |
-| 0x007E0000 / 0x007F0000 | 0x02A00000 / 0x02A10000 | 32-bit register block (index / data) |
-| 0x03800000–0x03BFFFFF | 0x03000000 | flash, alias |
-| 0x03C00000–0x03FFFFFF | same | flash (OS at 0x03FB0000) |
+| 0x007E0000 / 0x007F0000 | 0x02A00000 / 0x02A10000 | radio DSP IDMA port (address / data) |
+| 0x03800000–0x03BFFFFF | 0x03000000 | flash chip 2 (AMD command set): file system + serial loader |
+| 0x03C00000–0x03FFFFFF | same | flash chip 1 (Intel): OS at 0x03FB0000, apps below it, boot blocks on top |
 
 ## Flash
+
+There are two chips.
+
+### Chip 2: file system (AMD command set, x16, 4 MB, physical 0x03000000)
+
+* Unlock cycles at word 0x555/0x2AA (byte 0xAAA/0x554), program 0xA0, sector
+  erase 0x80…0x30, CFI query 0x98 at word 0x55 ("QRY", size code 0x16).
+* The file area starts at linear 0x03810000.
+* A separate **serial loader** program lives at linear 0x03B00000–0x03B0FFFF.
+  The OS checks for its entry code (`FA E9`, i.e. `cli; jmp`) at 0x03B0FFF0
+  before handing over; if it isn't there, the OS just resets.
+
+### Chip 1: OS and apps
 
 * Intel boot-block command set, x16, 4 MB (`28F320B3` style, device ID 0x8896).
   The OS accepts IDs 0x8890–0x8896 and also reads the CFI table ("QRY",
@@ -44,6 +57,41 @@ by running them in the emulator and tracing what they touch.
   module has a 0x48-byte header at its top, with a self-pointer at +0x44.
   The OS's boot record at 0x03FEFFB8 starts the chain.
 
+## Top boot block (0x03FF0000–0x03FFFFFF, eight 8 KB parameter blocks)
+
+* 0x03FF6000: loader status word. -1 = last load never finished ("Last load
+  was incomplete"), -5 = go to the loader, 0 = defragment applications. Any other
+  value is a completed load; the emulator writes -2 (RIM's default release ID).
+* 0x03FF4000…: device information; 0x03FFA000…: flash allocation log;
+  0x03FFFFC0+: boot ROM data (not dumped).
+
+## Radio DSP (ADSP-218x, seen through IDMA)
+
+* IDMA address register at physical 0x02A00000, data register at 0x02A10000.
+  Bit 14 of the address selects data memory; addresses auto-increment;
+  24-bit program words take two 16-bit transfers.
+* The OS loads the Mobitex firmware, then writes the entry point to PM 0 to
+  start the DSP.
+* DSP → host queue: DM 0x2080–0x20FC, write index DM 0x20FE, read index DM
+  0x20FF, status DM 0x20FD (must be 0). Message = `[length][words…]`.
+* Host → DSP queue: DM 0x2000–0x207C, write index DM 0x207E, read index DM
+  0x207F. Message = `[length][command][params…]`. The host interrupts the DSP
+  by toggling bit 4 of P1LTC (0xF862).
+* The DSP interrupts the host on master PIC IRQ 5. Replies carry the command ID.
+* Command 2 = power down; the DSP acknowledges on bit 0 of port 0xF863.
+* The emulator fakes the DSP: it posts `1` after start, echoes every command
+  ID, and acknowledges power-down. That's enough for the radio to initialise
+  (state goes 2, then 1 = sleeping).
+
+## Serial / loader protocol
+
+* The cradle port is COM2: 16450 UART at 0x2F8, IRQ 3 (divisor 12 at boot).
+* Programmer.exe opens the link by sending `0E AA 0F F0`. The OS recognises
+  this and jumps to the serial loader (see chip 2).
+* The loader replies `0x06` (ACK) or `'A'`, then Programmer sends packets
+  (first one is `0x42`); NAK is `0x15`. Next step: emulate the loader side of
+  this protocol so the real Programmer.exe can install apps.
+
 ## I/O ports
 
 | Port | Device |
@@ -52,7 +100,9 @@ by running them in the emulator and tracing what they touch.
 | 0x40–0x43 (and 0xF040…) | 8254 timers (386EX internal) |
 | 0x70/0x71 | MC146818-compatible RTC (binary mode, 24 h) |
 | 0x92 | fast reset (OS uses it after a fatal error) |
-| 0x0000–0x0007 | 16550-style UART (8N1, divisor 12), probably the radio modem |
+| 0x2F8–0x2FF | COM2 UART (cradle / loader), IRQ 3 |
+| 0xF862 bit 4 | host → DSP interrupt |
+| 0xF863 bit 0 | DSP power-down acknowledge |
 | 0x380 / 0x382 | **LCD controller**, command / data |
 | 0xF4xx | 386EX chip selects, watchdog (0xF4C8) |
 | 0xF8xx | 386EX pin configuration and I/O ports P1–P3 (0xF860–0xF876) |
@@ -72,8 +122,12 @@ by running them in the emulator and tracing what they touch.
 
 The OS keeps a 160×20-byte shadow framebuffer and sends only the dirty rows.
 
-## Boot status (milestone 1)
+## Boot status (milestone 2)
 
-The 957 OS boots all the way to its idle loop and clears the LCD. Nothing is
-drawn yet because there are no apps (ribbon.dll etc.) in flash. Next:
-work out the module format the RIM `Programmer` writes and load DLLs into flash.
+The 957, 950 and 850 OS images boot through radio initialisation, the flash
+file system and the OS self-check (CRC-32 over the image) into normal
+multitasking, with the cradle serial port running. The screen stays blank
+because the fonts and UI come with the apps. The 857 image hits a
+general-protection loop that still needs looking at.
+
+Next: emulate the serial loader so Programmer.exe can load apps.

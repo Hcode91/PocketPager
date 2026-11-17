@@ -2,9 +2,74 @@
  * PocketPager headless runner, used for reverse engineering and CI.
  *   ppcli Pager957.bin [milliseconds] [screen.pgm]
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <termios.h>
+#include <time.h>
+#include <errno.h>
 #include "../core/rim/board.h"
+
+static int g_pty = -1;
+static int g_serlog;
+static void pty_tx(void *ctx, unsigned char c)
+{
+	(void)ctx;
+	if (g_serlog) fprintf(stderr, "dev> %02x\n", c);
+	if (write(g_pty, &c, 1) < 0) { /* host not connected yet */ }
+}
+
+static long long now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+
+/* Real-time loop with COM2 bridged to a pseudo-terminal. */
+static void run_serial(PPBoard *b, int ms)
+{
+	g_pty = posix_openpt(O_RDWR | O_NOCTTY);
+	grantpt(g_pty);
+	unlockpt(g_pty);
+	struct termios t;
+	int slave = open(ptsname(g_pty), O_RDWR | O_NOCTTY);
+	tcgetattr(slave, &t);
+	cfmakeraw(&t);
+	tcsetattr(slave, TCSANOW, &t);
+	fcntl(g_pty, F_SETFL, O_NONBLOCK);
+	printf("COM2 bridged to %s\n", ptsname(g_pty));
+	fflush(stdout);
+	if (getenv("PP_PTYLINK")) {
+		unlink(getenv("PP_PTYLINK"));
+		if (symlink(ptsname(g_pty), getenv("PP_PTYLINK")) != 0) perror("symlink");
+	}
+	g_serlog = getenv("PP_SERLOG") != NULL;
+	pp_serial_set_host(b, 1, (void (*)(void *, unsigned char))pty_tx, NULL);
+	long long start = now_us();
+	long long emu = 0;
+	while (ms <= 0 || emu < ms * 1000LL) {
+		unsigned char buf[512];
+		int space = pp_serial_rx_space(b, 1);
+		if (space > (int)sizeof buf) space = sizeof buf;
+		if (space > 0) {
+			int n = read(g_pty, buf, space);
+			if (n > 0) {
+				if (g_serlog) for (int i = 0; i < n; i++) fprintf(stderr, "host> %02x\n", buf[i]);
+				pp_serial_rx(b, 1, buf, n);
+			}
+		}
+		pp_board_run(b, 2000);
+		emu += 2000;
+		if (pp_board_stopped(b)) break;
+		long long ahead = emu - (now_us() - start);
+		if (ahead > 0) usleep(ahead);
+	}
+	close(slave);
+}
 
 static const char *models[] = { "950", "850", "957", "857" };
 
@@ -31,6 +96,10 @@ int main(int argc, char **argv)
 
 	if (getenv("PP_TRACE")) pp_board_set_trace(b, 1);
 	int ms = argc > 2 ? atoi(argv[2]) : 1000;
+	if (getenv("PP_SERIAL")) {
+		run_serial(b, ms);
+		goto done;
+	}
 	char st[256];
 	for (int t = 0; t < ms; t += 100) {
 		pp_board_run(b, 100000);
@@ -39,6 +108,13 @@ int main(int argc, char **argv)
 		if (pp_board_stopped(b)) break;
 	}
 
+done:
+	if (getenv("PP_SAVEFLASH")) {
+		FILE *o = fopen(getenv("PP_SAVEFLASH"), "wb");
+		fwrite(pp_board_mem(b) + 0x03C00000, 1, 0x400000, o);
+		fclose(o);
+		printf("flash saved to %s\n", getenv("PP_SAVEFLASH"));
+	}
 	if (argc > 3) {
 		int w = pp_lcd_width(b), h = pp_lcd_height(b);
 		unsigned int *px = malloc(w * h * 4);
