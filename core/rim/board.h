@@ -17,6 +17,13 @@ void pp_log(const char *fmt, ...);
 PPBoard *pp_board_new(const uint8_t *os_image, size_t len, char *err, size_t errlen);
 void pp_board_free(PPBoard *b);
 void pp_board_reset(PPBoard *b);
+/* Erase both flash chips and reinstall the OS image (a "wiped" device). */
+void pp_board_factory(PPBoard *b);
+/* Flash contents: 4 MB OS/app chip followed by 4 MB file-system chip. */
+#define PP_FLASH_IMAGE_SIZE 0x800000
+void pp_board_get_flash(PPBoard *b, uint8_t *out);
+int pp_board_set_flash(PPBoard *b, const uint8_t *in, size_t len);
+int pp_board_flash_dirty(PPBoard *b);
 
 /* Run roughly `us` microseconds of emulated time. */
 void pp_board_run(PPBoard *b, uint32_t us);

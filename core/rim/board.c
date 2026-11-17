@@ -44,6 +44,7 @@ typedef struct PPBoard PPBoard;
 typedef struct {
 	uint8_t ier, lcr, mcr, scr, dll, dlm, rbr, msr, msr_delta;
 	int rbr_full, thre_pending, tx_busy, irq_level;
+	uint32_t hs_window;
 	uint64_t next_rx, tx_done;
 	uint8_t rx[UART_FIFO];
 	int rh, rt;
@@ -97,6 +98,19 @@ struct PPBoard {
 	uint16_t dsp_dm[0x4000];
 	int dsp_running, dsp_irq, dsp_pwdack;
 
+	/* Keyboard matrix (RIM ASIC at 0xFC30-0xFC38, IRQ 1) and trackwheel
+	 * (quadrature: IRQ 13 + P1 0xF863 bit 2 / IRQ 12 + 0xF867 bit 6). */
+	uint16_t keymap[64];          /* OS key table: index = row << 3 | col */
+	uint8_t kb_rows[8];           /* pressed rows per column */
+	uint8_t kb_colsel;            /* 0xFC30, active-low column select */
+	uint16_t kb_ctl;              /* 0xFC38 */
+	uint64_t kb_next;             /* next scan-timer interrupt */
+	int kb_detect_fired;
+	int wheel_pending;            /* queued steps: >0 one way, <0 the other */
+	uint64_t wheel_next;
+	int wheel_phase;              /* 0 idle, 1 pin asserted */
+	int wheel_dir;
+
 	/* LCD controller at ports 0x380 (command) / 0x382 (data) */
 	uint8_t lcd_ram[160 * 20];
 	uint8_t lcd_cmd;
@@ -112,6 +126,15 @@ struct PPBoard {
 	uint64_t rtc_last_us;
 
 	uint64_t instr;
+
+	/* Emulated RIM serial loader (replaces the loader that lives in flash
+	 * on a real device; see the loader section). */
+	int ldr_active;
+	int reset_pending;
+	uint8_t ldr_buf[0x12000];
+	int ldr_len, ldr_step, ldr_cmd, ldr_need;
+	uint32_t ldr_addr;
+	uint32_t ldr_wlen;
 
 	/* debug: instruction trace ring */
 	int trace;
@@ -219,6 +242,8 @@ uint32_t get_uticks(void)
 /* 16450-style UART. The OS uses COM2 (0x2F8, IRQ 3) for the cradle/loader;
  * COM1 (0x3F8, IRQ 4) is modelled the same way. */
 
+static void place_loader_stub(PPBoard *b);
+
 static void uart_update_irq(PPBoard *b, int n)
 {
 	UART *u = &b->uart[n];
@@ -259,6 +284,9 @@ static void uart_tick(PPBoard *b)
 		UART *u = &b->uart[n];
 		if (!u->rbr_full && u->rh != u->rt && b->instr >= u->next_rx) {
 			u->rbr = u->rx[u->rt];
+			u->hs_window = (u->hs_window << 8) | u->rbr;
+			if (n == 1 && u->hs_window == 0x0EAA0FF0u)
+				place_loader_stub(b);   /* the OS may have reused that flash */
 			u->rt = (u->rt + 1) % UART_FIFO;
 			u->rbr_full = 1;
 			u->next_rx = b->instr + uart_byte_instr(u);
@@ -505,10 +533,91 @@ static void rtc_write(PPBoard *b, uint8_t v)
 	b->rtc_secs = ymd_to_days(y, m, d) * 86400 + hh * 3600 + mm * 60 + ss;
 }
 
+/* ------------------------------------------------------------ keyboard */
+
+static void irq_pulse(PPBoard *b, int irq)
+{
+	i8259_set_irq(b->pic, irq, 1);
+	i8259_set_irq(b->pic, irq, 0);
+}
+
+static int kb_any_pressed(PPBoard *b)
+{
+	for (int c = 0; c < 8; c++) if (b->kb_rows[c]) return 1;
+	return 0;
+}
+
+static uint8_t kb_read_rows(PPBoard *b)
+{
+	uint8_t sel = ~b->kb_colsel, rows = 0;
+	for (int c = 0; c < 8; c++)
+		if (sel & (1 << c)) rows |= b->kb_rows[c];
+	return ~rows;
+}
+
+static void kb_tick(PPBoard *b)
+{
+	if (b->kb_ctl & 0x100) {
+		/* idle: interrupt when a key goes down */
+		if (kb_any_pressed(b)) {
+			if (!b->kb_detect_fired) { irq_pulse(b, 1); b->kb_detect_fired = 1; }
+		} else {
+			b->kb_detect_fired = 0;
+		}
+	} else if (b->kb_ctl & 1) {
+		/* scanning: periodic interrupt, one column per tick */
+		if (b->instr >= b->kb_next) {
+			b->kb_next = b->instr + 2000 * IPS_PER_US;
+			irq_pulse(b, 1);
+		}
+	}
+	/* trackwheel: assert the phase pin, then interrupt */
+	if (b->wheel_phase && b->instr >= b->wheel_next) {
+		b->wheel_phase = 0;                      /* release pin */
+		b->wheel_next = b->instr + 4000 * IPS_PER_US;
+	} else if (!b->wheel_phase && b->wheel_pending && b->instr >= b->wheel_next) {
+		b->wheel_dir = b->wheel_pending > 0 ? 1 : -1;
+		b->wheel_pending -= b->wheel_dir;
+		b->wheel_phase = 1;
+		b->wheel_next = b->instr + 1000 * IPS_PER_US;
+		irq_pulse(b, b->wheel_dir > 0 ? 13 : 12);
+	}
+}
+
+static void kb_find_keymap(PPBoard *b)
+{
+	static const uint8_t qwert[] = { 'Q', 0, 'W', 0, 'E', 0, 'R', 0, 'T', 0 };
+	memset(b->keymap, 0, sizeof b->keymap);
+	for (size_t i = 0; i + 128 < OS_SIZE; i += 2) {
+		if (!memcmp(b->os + i, qwert, sizeof qwert)) {
+			for (int k = 0; k < 64; k++)
+				b->keymap[k] = b->os[i + 2 * k] | b->os[i + 2 * k + 1] << 8;
+			return;
+		}
+	}
+}
+
+/* Press or release the matrix key that produces OS key code `code`. */
+static int kb_set_code(PPBoard *b, uint16_t code, int down)
+{
+	for (int k = 0; k < 64; k++) {
+		if (b->keymap[k] == code) {
+			int row = k >> 3, col = k & 7;
+			if (down) b->kb_rows[col] |= 1 << row;
+			else b->kb_rows[col] &= ~(1 << row);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------ LCD */
 
 static void lcd_command(PPBoard *b, uint8_t c)
 {
+	static int lg = -1;
+	if (lg < 0) lg = getenv("PP_LCDLOG") != NULL;
+	if (lg && c != 0x5C && c != 0xBE) pp_log("lcd cmd %02x", c);
 	b->lcd_cmd = c;
 	b->lcd_argc = 0;
 	switch (c) {
@@ -522,6 +631,9 @@ static void lcd_command(PPBoard *b, uint8_t c)
 
 static void lcd_data(PPBoard *b, uint8_t v)
 {
+	static int lg = -1;
+	if (lg < 0) lg = getenv("PP_LCDLOG") != NULL;
+	if (lg && v) pp_log("lcd data %02x cmd %02x row %d col %d", v, b->lcd_cmd, b->lcd_row, b->lcd_col);
 	switch (b->lcd_cmd) {
 	case 0x5C:
 		if (b->lcd_row >= 0 && b->lcd_row < 160 && b->lcd_col < 20) {
@@ -558,7 +670,14 @@ static uint8_t io_read8(void *o, int port)
 		return i8254_ioport_read(b->pit, port & 0xFF);
 	case 0x70: return b->rtc_idx;
 	case 0x71: return rtc_read(b);
-	case 0xF863: return (b->ioreg[0xF863] & ~1) | b->dsp_pwdack; /* DSP PWDACK */
+	case 0x380: return 0x62;                /* LCD controller status/ID; bit 7 = busy */
+	case 0xFC30: return b->kb_colsel;
+	case 0xFC34: return kb_read_rows(b);
+	case 0xF863: return (b->ioreg[0xF863] & ~5) | b->dsp_pwdack |
+			    ((b->wheel_phase && b->wheel_dir > 0) ? 4 : 0);  /* DSP PWDACK, wheel */
+	case 0xF867: return (b->ioreg[0xF867] & ~0x40) |
+			    ((b->wheel_phase && b->wheel_dir < 0) ? 0x40 : 0); /* wheel */
+	case 0xF877: return b->ioreg[0xF877] | 0x08;    /* holster sensor: out of holster */
 	case 0xF860: return b->pin[0];          /* P1PIN */
 	case 0xF868: return b->pin[1];          /* P2PIN */
 	case 0xF870: return b->pin[2];          /* P3PIN */
@@ -584,11 +703,18 @@ static void io_write8(void *o, int port, uint8_t v)
 	case 0xF040: case 0xF041: case 0xF042: case 0xF043:
 		i8254_ioport_write(b->pit, port & 0xFF, v); return;
 	case 0x380: lcd_command(b, v); return;
+	case 0xFC30: b->kb_colsel = v; return;
+	case 0xFC38: b->kb_ctl = (b->kb_ctl & 0xFF00) | v; b->kb_next = b->instr + 2000 * IPS_PER_US; return;
+	case 0xFC39: b->kb_ctl = (b->kb_ctl & 0x00FF) | v << 8; b->kb_detect_fired = 0; return;
 	case 0x382: lcd_data(b, v); return;
 	case 0x70: b->rtc_idx = v; return;
 	case 0x71: rtc_write(b, v); return;
 	case 0x92:
-		if (v & 1) { pp_log("port 92 reset requested"); dump_ring(b, "reset"); }
+		if (v & 1) {
+			pp_log("port 92 reset requested");
+			if (b->trace) dump_ring(b, "reset");
+			else b->reset_pending = 1;
+		}
 		b->ioreg[port] = v; return;
 	case 0xF4C8: case 0xF4C9:               /* WDTCLR: watchdog kick */
 		b->ioreg[port] = v; return;
@@ -1065,6 +1191,268 @@ static void raise_irq(void *o, PicState2 *s)
 static int read_irq(void *o) { return i8259_read_irq(o); }
 static void set_irq(void *pic, int irq, int level) { i8259_set_irq(pic, irq, level); }
 
+/* ------------------------------------------------------------ serial loader */
+
+/* RIM's Programmer talks to a small loader on the device. Commands arrive
+ * framed as 01 <cmd> 04; the loader answers 06 (ACK) / 15 (NAK). Most
+ * commands then exchange fixed-size binary arguments. Data blocks carry a
+ * CRC-16/KERMIT. Programmer does all the clever work (layout, relocation,
+ * import tables); the loader only reads, writes and erases flash. */
+
+static int ldr_log_on(void)
+{
+	static int on = -1;
+	if (on < 0) on = getenv("PP_LDRLOG") != NULL;
+	return on;
+}
+
+static uint16_t crc16_kermit(const uint8_t *p, size_t n, uint16_t crc)
+{
+	while (n--) {
+		crc ^= *p++;
+		for (int i = 0; i < 8; i++)
+			crc = (crc & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
+	}
+	return crc;
+}
+
+static uint32_t crc32_std(const uint8_t *p, size_t n, uint32_t crc)
+{
+	crc = ~crc;
+	while (n--) {
+		crc ^= *p++;
+		for (int i = 0; i < 8; i++)
+			crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+	}
+	return ~crc;
+}
+
+static void ldr_tx(PPBoard *b, const uint8_t *d, int n)
+{
+	if (ldr_log_on()) {
+		char hex[100]; int o = 0;
+		for (int i = 0; i < n && i < 32; i++) o += snprintf(hex + o, sizeof hex - o, "%02x", d[i]);
+		pp_log("ldr> %s%s (%d)", hex, n > 32 ? ".." : "", n);
+	}
+	for (int i = 0; i < n; i++)
+		if (b->tx_fn[1]) b->tx_fn[1](b->tx_ctx[1], d[i]);
+}
+static void ldr_tx1(PPBoard *b, uint8_t c) { ldr_tx(b, &c, 1); }
+
+/* Map a loader address (the device's linear view) to emulator memory. */
+static uint8_t *ldr_ptr(PPBoard *b, uint32_t a)
+{
+	if (a >= 0x03800000u && a < 0x03C00000u)
+		return b->mem + FS_BASE + (a - 0x03800000u);
+	return b->mem + (a & ADDR_MASK);
+}
+
+static int ldr_is_flash(uint32_t a)
+{
+	return a >= 0x03800000u && a < 0x04000000u;
+}
+
+static void ldr_erase(PPBoard *b, uint32_t a)
+{
+	uint32_t start, len;
+	if (a >= 0x03800000u && a < 0x03C00000u) {          /* FS chip: 64 KB */
+		start = a & ~0xFFFFu; len = 0x10000;
+	} else {
+		fl_block(a - FLASH_BASE, &start, &len);
+		start += FLASH_BASE;
+	}
+	if (ldr_log_on()) pp_log("ldr: erase %08x (+%x)", start, len);
+	memset(ldr_ptr(b, start), 0xFF, len);
+	b->fl_dirty = 1;
+}
+
+static void ldr_hw_descriptor(PPBoard *b, uint8_t out[62])
+{
+	/* 'WHMR' record: 4 bytes of hardware IDs and the device name, taken from
+	 * the OS image so Programmer accepts it as the right device. */
+	memset(out, 0, 62);
+	memcpy(out, "WHMR", 4);
+	const uint8_t *os = b->os;
+	for (int i = 0; i + 40 < OS_SIZE; i++) {
+		if (!memcmp(os + i, "WHMR", 4) && os[i + 8] == 'R') {
+			memcpy(out + 4, os + i + 4, 4);
+			size_t n = strnlen((const char *)os + i + 8, 47);
+			memcpy(out + 8, os + i + 8, n);
+			break;
+		}
+	}
+	memcpy(out + 56, "WHMR", 4);
+}
+
+enum { LS_IDLE, LS_ARGS };
+
+static void ldr_command(PPBoard *b, int c)
+{
+	b->ldr_cmd = c;
+	if (ldr_log_on()) pp_log("ldr: command '%c' (%02x)", c >= 32 ? c : '.', c);
+	uint8_t buf[64];
+	switch (c) {
+	case 'B': ldr_tx1(b, 0x04); b->ldr_need = 4; b->ldr_step = LS_ARGS; return;
+	case 'U': ldr_tx1(b, 0x15); return;                     /* no scrambling */
+	case 'v': ldr_tx1(b, 0x06); b->ldr_need = 8; b->ldr_step = LS_ARGS; return;
+	case 'p': ldr_tx1(b, 0x06); b->ldr_need = 20; b->ldr_step = LS_ARGS; return;
+	case 'H':
+		ldr_tx1(b, 0x06);
+		ldr_hw_descriptor(b, buf);
+		ldr_tx(b, buf, 62);
+		return;
+	case 'I': ldr_tx1(b, 0x06); buf[0] = FLASH_ID_DEV & 0xFF; buf[1] = FLASH_ID_DEV >> 8; ldr_tx(b, buf, 2); return;  /* flash device ID */
+	case 'r': ldr_tx1(b, 0x06); memset(buf, 0, 4); ldr_tx(b, buf, 4); return;
+	case 'o': ldr_tx1(b, 0x06); memset(buf, 0, 8); ldr_tx(b, buf, 8); return;
+	case 'h': ldr_tx1(b, 0x06); buf[0] = 0; ldr_tx(b, buf, 1); return;
+	case 'n': ldr_tx1(b, 0x06); ldr_tx1(b, 0x06); return;
+	case 'z': ldr_tx1(b, 0x06); ldr_tx1(b, 0x06); return;
+	case 'R': case 'V': case 'T': case 'P':
+		ldr_tx1(b, 0x06); b->ldr_need = (c == 'R') ? 6 : 8; b->ldr_step = LS_ARGS; return;
+	case 'C': ldr_tx1(b, 0x06); b->ldr_need = 4; b->ldr_step = LS_ARGS; return;
+	case 'S': ldr_tx1(b, 0x06); b->ldr_need = 2; b->ldr_step = LS_ARGS; return;
+	case 'W': ldr_tx1(b, 0x06); b->ldr_need = 6; b->ldr_step = LS_ARGS; b->ldr_wlen = 0; return;
+	case 'X':
+		ldr_tx1(b, 0x06);
+		pp_log("loader: Programmer disconnected, rebooting");
+		b->ldr_active = 2;                              /* reboot after this tick */
+		return;
+	}
+	pp_log("loader: unknown command %02x", c);
+	ldr_tx1(b, 0x15);
+}
+
+static uint32_t rd32le(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static void ldr_args(PPBoard *b, const uint8_t *a)
+{
+	uint8_t out[8];
+	switch (b->ldr_cmd) {
+	case 'B': ldr_tx1(b, rd32le(a) ? 0x06 : 0x15); break;
+	case 'v': case 'p': case 'S': ldr_tx1(b, 0x06); break;
+	case 'R': {
+		uint32_t addr = rd32le(a);
+		uint16_t len = a[4] | a[5] << 8;
+		if (ldr_log_on()) pp_log("ldr: read %08x +%x", addr, len);
+		uint8_t *p = ldr_ptr(b, addr);
+		ldr_tx1(b, 0x06);
+		ldr_tx(b, p, len);
+		uint16_t c = crc16_kermit(p, len, 0);
+		out[0] = c; out[1] = c >> 8;
+		ldr_tx(b, out, 2);
+		break;
+	}
+	case 'V': case 'P': {
+		uint32_t addr = rd32le(a), len = rd32le(a + 4);
+		uint32_t c = crc32_std(ldr_ptr(b, addr), len, 0);
+		if (ldr_log_on()) pp_log("ldr: %c %08x +%x -> %08x", b->ldr_cmd, addr, len, c);
+		ldr_tx1(b, 0x06);
+		out[0] = c; out[1] = c >> 8; out[2] = c >> 16; out[3] = c >> 24;
+		ldr_tx(b, out, 4);
+		break;
+	}
+	case 'T': {
+		uint32_t addr = rd32le(a), len = rd32le(a + 4);
+		const uint8_t *p = ldr_ptr(b, addr);
+		int blank = 1;
+		for (uint32_t i = 0; i < len; i++) if (p[i] != 0xFF) { blank = 0; break; }
+		if (ldr_log_on()) pp_log("ldr: test %08x +%x blank=%d", addr, len, blank);
+		ldr_tx1(b, blank ? 0x06 : 0x15);
+		break;
+	}
+	case 'C': ldr_erase(b, rd32le(a)); ldr_tx1(b, 0x06); break;
+	}
+}
+
+static void ldr_write_block(PPBoard *b, const uint8_t *hdr, const uint8_t *data, uint32_t len, const uint8_t *crc)
+{
+	uint32_t addr = rd32le(hdr);
+	uint16_t want = crc[0] | crc[1] << 8;
+	uint16_t got = crc16_kermit(hdr, 6, 0);
+	got = crc16_kermit(data, len, got);
+	if (ldr_log_on()) pp_log("ldr: write %08x +%x crc %04x/%04x", addr, len, want, got);
+	if (want != got) {
+		/* try data-only CRC before rejecting */
+		if (crc16_kermit(data, len, 0) != want) {
+			ldr_tx1(b, 0x15);
+			return;
+		}
+	}
+	uint8_t *p = ldr_ptr(b, addr);
+	if (ldr_is_flash(addr)) {
+		for (uint32_t i = 0; i < len; i++) p[i] &= data[i];
+		b->fl_dirty = 1;
+	} else {
+		memcpy(p, data, len);
+	}
+	ldr_tx1(b, 0x06);
+}
+
+/* Feed bytes the host sent while the loader is in control. */
+static void ldr_process(PPBoard *b)
+{
+	for (;;) {
+		uint8_t *q = b->ldr_buf;
+		int n = b->ldr_len, used = 0;
+		if (b->ldr_step == LS_IDLE) {
+			if (n < 1) return;
+			if (q[0] == 0x0E) {
+				if (n < 4) return;
+				if (q[1] == 0xAA && q[2] == 0x0F && q[3] == 0xF0) ldr_tx1(b, 0x06);
+				used = 4;
+			} else if (q[0] == 0x01) {
+				if (n < 3) return;
+				used = 3;
+				ldr_command(b, q[1]);
+			} else {
+				used = 1;
+			}
+		} else if (b->ldr_cmd == 'W') {
+			if (n < 6) return;
+			uint32_t len = q[4] | q[5] << 8;
+			if ((uint32_t)n < 6 + len + 2) return;
+			ldr_write_block(b, q, q + 6, len, q + 6 + len);
+			used = 6 + len + 2;
+			b->ldr_step = LS_IDLE;
+		} else {
+			if (n < b->ldr_need) return;
+			used = b->ldr_need;
+			b->ldr_step = LS_IDLE;
+			ldr_args(b, q);
+		}
+		memmove(b->ldr_buf, b->ldr_buf + used, n - used);
+		b->ldr_len = n - used;
+	}
+}
+
+static void ldr_tick(PPBoard *b)
+{
+	UART *u = &b->uart[1];
+	while (u->rh != u->rt && b->ldr_len < (int)sizeof(b->ldr_buf)) {
+		uint8_t c = u->rx[u->rt];
+		u->rt = (u->rt + 1) % UART_FIFO;
+		if (ldr_log_on() && b->ldr_len < 0) pp_log("host> %02x", c);
+		b->ldr_buf[b->ldr_len++] = c;
+	}
+	ldr_process(b);
+}
+
+static void ldr_check_entry(PPBoard *b)
+{
+	if (b->ldr_active || !cpui386_is_halted(b->cpu))
+		return;
+	CPUI386_State st;
+	cpui386_get_state(b->cpu, &st);
+	if ((st.ip & 0xFFFF) >= 0xFFF4 && (st.ip & 0xFFFF) <= 0xFFF7) {
+		pp_log("loader: OS handed over to the serial loader");
+		b->ldr_active = 1;
+		b->ldr_len = 0;
+		b->ldr_step = LS_IDLE;
+		/* The OS saw 0E AA 0F F0 before handing over; answer it now. */
+		ldr_tx1(b, 0x06);
+	}
+}
+
 /* ------------------------------------------------------------ board */
 
 static int detect_model(const uint8_t *os)
@@ -1137,21 +1525,66 @@ PPBoard *pp_board_new(const uint8_t *img, size_t len, char *err, size_t errlen)
 	g_board = b;
 	b->pit = i8254_init(0, b->pic, set_irq);
 
+	kb_find_keymap(b);
+	pp_board_factory(b);
 	pp_board_reset(b);
 	return b;
 }
 
-void pp_board_reset(PPBoard *b)
+#define LOADER_STUB_LIN  0x03B0FFF0u   /* where the OS looks for the serial loader */
+
+/* The boot ROM keeps an info block at 0x03FFC020 that Programmer reads:
+ * magic AB CD EF "Rim:V", a boot ROM version word at +0x74 and a size in
+ * KB at +0xC8. We report version 0x1050, older than every optional
+ * Programmer feature, so it sticks to plain read/write/erase commands. */
+static void write_boot_info(PPBoard *b)
 {
-	memset(b->mem, 0, MEM_SIZE);
-	/* flash is erased (0xFF) apart from the OS */
-	memset(b->mem + 0x03C00000, 0xFF, 0x400000);
+	uint8_t *p = b->mem + 0x03FFC020;
+	memset(p, 0, 0xCC);
+	static const uint8_t magic[8] = { 0xAB, 0xCD, 0xEF, 'R', 'i', 'm', ':', 'V' };
+	memcpy(p, magic, 8);
+	p[0x74] = 0x50; p[0x75] = 0x10;
+	p[0xC8] = 0x00; p[0xC9] = 0x02;      /* 512 KB (RAM) */
+}
+
+/* Erase both flash chips and install the OS image, as after a fresh load. */
+void pp_board_factory(PPBoard *b)
+{
+	memset(b->mem + FLASH_BASE, 0xFF, FLASH_SIZE);
+	memset(b->mem + FS_BASE, 0xFF, FS_SIZE);
 	memcpy(b->mem + OS_BASE, b->os, OS_SIZE);
 	/* Boot block 3 holds the loader's status word: -1 = last load never
 	 * finished, -5 = enter loader, 0 = defragment. A finished load leaves
 	 * the release ID there; RIM's default release ID is -2. */
 	static const uint8_t release_id[4] = { 0xFE, 0xFF, 0xFF, 0xFF };
 	memcpy(b->mem + 0x03FF6000, release_id, 4);
+	write_boot_info(b);
+}
+
+/* Our stand-in for RIM's serial loader: "cli; jmp" where the OS checks for
+ * it, then "hlt; jmp $-1" at the entry. The board notices the CPU halting
+ * there and takes over the serial port (see loader.c section). */
+static void place_loader_stub(PPBoard *b)
+{
+	static const uint8_t stub[] = { 0xFA, 0xE9, 0xFF, 0xFF, 0xF4, 0xEB, 0xFD, 0x90 };
+	uint32_t fs_off = LOADER_STUB_LIN - 0x03800000u;
+	memcpy(b->mem + FS_BASE + fs_off, stub, sizeof stub);   /* via the FS chip */
+	memcpy(b->mem + LOADER_STUB_LIN, stub, sizeof stub);    /* paging off */
+	memcpy(b->mem + FS_BASE + 0xFFF0, stub, sizeof stub);   /* jump target: CS base 0x03000000 */
+}
+
+void pp_board_reset(PPBoard *b)
+{
+	/* RAM and unmapped space are cleared; both flash chips keep their contents. */
+	memset(b->mem, 0, FS_BASE);
+	memset(b->mem + FS_BASE + FS_SIZE, 0, FLASH_BASE - (FS_BASE + FS_SIZE));
+	place_loader_stub(b);
+	b->ldr_active = 0;
+	b->ldr_len = 0;
+	b->ldr_step = 0;
+	memset(b->kb_rows, 0, sizeof b->kb_rows);
+	b->kb_colsel = 0; b->kb_ctl = 0; b->kb_detect_fired = 0;
+	b->wheel_pending = 0; b->wheel_phase = 0;
 	memset(b->ioreg, 0, sizeof(b->ioreg));
 	memset(b->seen, 0, sizeof(b->seen));
 	b->pin[0] = b->pin[1] = b->pin[2] = 0xFF;
@@ -1159,7 +1592,6 @@ void pp_board_reset(PPBoard *b)
 	memset(pp_iomem_w, 0, sizeof(pp_iomem_w));
 	memset(pp_iomem_w + (FLASH_BASE >> 16), 1, FLASH_SIZE >> 16);
 	memset(pp_iomem_w + (FS_BASE >> 16), 1, FS_SIZE >> 16);
-	memset(b->mem + FS_BASE, 0xFF, FS_SIZE);
 	b->amd_step = 0;
 	amd_set_mode(b, AMD_ARRAY);
 	memset(pp_iomem_w + (DSP_BASE >> 16), 1, 2);
@@ -1225,6 +1657,15 @@ void pp_board_run(PPBoard *b, uint32_t us)
 		return;
 	}
 	while (b->instr < target && !b->stop) {
+		if (b->ldr_active) {
+			uint64_t step = 256 * 16;
+			b->instr += step;
+			ldr_tick(b);
+			if (b->ldr_active == 2) {
+				pp_board_reset(b);
+			}
+			continue;
+		}
 		if (b->trace) {
 			for (int i = 0; i < 256 && !b->stop; i++) {
 				CPUI386_State st;
@@ -1242,7 +1683,13 @@ void pp_board_run(PPBoard *b, uint32_t us)
 			i8254_update_irq(b->pit);
 			uart_tick(b);
 			dsp_tick(b);
+			kb_tick(b);
+			ldr_check_entry(b);
 			continue;
+		}
+		if (b->reset_pending) {
+			b->reset_pending = 0;
+			pp_board_reset(b);
 		}
 		int chunk = 256;
 		cpui386_step(b->cpu, chunk);
@@ -1250,6 +1697,8 @@ void pp_board_run(PPBoard *b, uint32_t us)
 		i8254_update_irq(b->pit);
 		uart_tick(b);
 		dsp_tick(b);
+		kb_tick(b);
+		ldr_check_entry(b);
 	}
 	g_abort_armed = 0;
 }
@@ -1266,8 +1715,10 @@ int pp_lcd_render(PPBoard *b, uint32_t *argb)
 	for (int y = 0; y < b->lcd_h; y++)
 		for (int x = 0; x < b->lcd_w; x++) {
 			int bit = 0;
+			/* The controller is page-addressed: each "row" the OS sends is
+			 * a screen column, each byte 8 pixels down (bit 0 on top). */
 			if (b->lcd_on && y < 160 && x < 160)
-				bit = (b->lcd_ram[y * 20 + (x >> 3)] >> (7 - (x & 7))) & 1;
+				bit = (b->lcd_ram[x * 20 + (y >> 3)] >> (y & 7)) & 1;
 			argb[y * b->lcd_w + x] = bit ? on : off;
 		}
 	return changed;
@@ -1275,7 +1726,21 @@ int pp_lcd_render(PPBoard *b, uint32_t *argb)
 
 void pp_key(PPBoard *b, int key, int down)
 {
-	(void)b; (void)key; (void)down;
+	uint16_t code;
+	switch (key) {
+	case PP_KEY_WHEEL_UP:   if (down) b->wheel_pending++; return;
+	case PP_KEY_WHEEL_DOWN: if (down) b->wheel_pending--; return;
+	case PP_KEY_WHEEL_CLICK: code = 0xFFFF; break;
+	case PP_KEY_ESC:   code = 0x1B; break;
+	case PP_KEY_ALT:   code = 0x101; break;
+	case PP_KEY_SHIFT: code = 0x100; break;
+	case PP_KEY_CAP:   code = 0x102; break;   /* left-side shift */
+	case PP_KEY_POWER: code = 0x103; break;   /* backlight key */
+	default:
+		code = (key >= 'a' && key <= 'z') ? key - 32 : key;
+		break;
+	}
+	kb_set_code(b, code, down);
 }
 
 void pp_board_status(PPBoard *b, char *buf, size_t len)
@@ -1289,4 +1754,23 @@ void pp_board_status(PPBoard *b, char *buf, size_t len)
 }
 
 uint64_t pp_board_instructions(PPBoard *b) { return b->instr; }
+
+void pp_board_get_flash(PPBoard *b, uint8_t *out)
+{
+	memcpy(out, b->mem + FLASH_BASE, FLASH_SIZE);
+	memcpy(out + FLASH_SIZE, b->mem + FS_BASE, FS_SIZE);
+	b->fl_dirty = 0;
+}
+
+int pp_board_set_flash(PPBoard *b, const uint8_t *in, size_t len)
+{
+	if (len != PP_FLASH_IMAGE_SIZE)
+		return 0;
+	memcpy(b->mem + FLASH_BASE, in, FLASH_SIZE);
+	memcpy(b->mem + FS_BASE, in + FLASH_SIZE, FS_SIZE);
+	b->fl_dirty = 0;
+	return 1;
+}
+
+int pp_board_flash_dirty(PPBoard *b) { return b->fl_dirty; }
 uint8_t *pp_board_mem(PPBoard *b) { return b->mem; }

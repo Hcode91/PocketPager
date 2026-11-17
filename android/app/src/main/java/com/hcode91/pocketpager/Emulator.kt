@@ -53,6 +53,14 @@ class Emulator(image: ByteArray) {
         thread = null
     }
 
+    /** Must be called with the emulator stopped. */
+    fun loadFlash(data: ByteArray): Boolean = Native.setFlash(handle, data)
+
+    /** Must be called with the emulator stopped. Returns null if nothing changed. */
+    fun dirtyFlash(): ByteArray? = if (Native.flashDirty(handle)) Native.getFlash(handle) else null
+
+    fun factoryReset() = Native.factory(handle)
+
     fun destroy() {
         stop()
         Native.destroy(handle)

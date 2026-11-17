@@ -27,6 +27,12 @@ object Native {
     @JvmStatic external fun status(h: Long): String
     @JvmStatic external fun stopped(h: Long): Boolean
     @JvmStatic external fun drainLog(): String
+    @JvmStatic external fun getFlash(h: Long): ByteArray
+    @JvmStatic external fun setFlash(h: Long, data: ByteArray): Boolean
+    @JvmStatic external fun flashDirty(h: Long): Boolean
+    @JvmStatic external fun factory(h: Long)
+
+    const val FLASH_SIZE = 0x800000
 
     val modelNames = arrayOf("RIM 950", "RIM 850", "RIM 957", "RIM 857")
 }

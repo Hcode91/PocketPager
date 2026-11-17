@@ -88,9 +88,14 @@ There are two chips.
 * The cradle port is COM2: 16450 UART at 0x2F8, IRQ 3 (divisor 12 at boot).
 * Programmer.exe opens the link by sending `0E AA 0F F0`. The OS recognises
   this and jumps to the serial loader (see chip 2).
-* The loader replies `0x06` (ACK) or `'A'`, then Programmer sends packets
-  (first one is `0x42`); NAK is `0x15`. Next step: emulate the loader side of
-  this protocol so the real Programmer.exe can install apps.
+* The OS jumps to a loader stub that must start `FA E9` at linear 0x3B0FFF0
+  (target physical 0x0300FFF4). PocketPager places a halt there and runs the
+  loader in C.
+* Packets are `01 <cmd> 04` + arguments; ACK `06`, NAK `15`, `7F` reconnects.
+  `B` baud, `U` scramble (NAK it), `v` programmer version, `p` params,
+  `H` 62-byte device descriptor, `I` flash ID (0x8896), `R` read (addr32,
+  len16 → data + CRC-16/KERMIT), `W` write (addr32, len16, data, CRC-16),
+  `C` erase block, `T` blank check, `V`/`P` CRC-32, `X` disconnect.
 
 ## I/O ports
 
@@ -107,6 +112,13 @@ There are two chips.
 | 0xF4xx | 386EX chip selects, watchdog (0xF4C8) |
 | 0xF8xx | 386EX pin configuration and I/O ports P1–P3 (0xF860–0xF876) |
 | 0xFC00–0xFC3F | RIM custom chip |
+| 0xFC30 | keyboard column select (active-low one-hot; 0 = all columns) |
+| 0xFC34 | keyboard rows of the selected columns (active low, 7 bits) |
+| 0xFC38/9 | keyboard mode: 0x14A = interrupt on any key, 0xC0/0xC1 = periodic scan |
+| 0x380 read | LCD status, must return 0x62 or apps refuse to load |
+| 0xF863 bit 2 + IRQ 13 | trackwheel step one way |
+| 0xF867 bit 6 + IRQ 12 | trackwheel step the other way |
+| 0xF877 bit 3 | holster sensor (1 = out of holster) |
 | 0xFCA0–0xFCAE | RIM sleep timer (idle loop arms it, then reads back elapsed time) |
 
 ## LCD (957/857: 160×160, 1 bit per pixel)
@@ -122,6 +134,18 @@ There are two chips.
 
 The OS keeps a 160×20-byte shadow framebuffer and sends only the dirty rows.
 
+## Keyboard
+
+IRQ 1. The OS key table (found by searching the image for `'Q',0,'W',0`) is
+64 words indexed by `row << 3 | col`. Key codes follow the SDK's Rim.h; the
+trackwheel click is the matrix key with code 0xFFFF (row 0, column 7).
+
+## Status (milestone 3)
+
+The 957 boots to the home screen with the system apps and 12 games
+installed through the real Programmer.exe, and games (RimVaders tested)
+launch and play.
+
 ## Boot status (milestone 2)
 
 The 957, 950 and 850 OS images boot through radio initialisation, the flash
@@ -130,4 +154,4 @@ multitasking, with the cradle serial port running. The screen stays blank
 because the fonts and UI come with the apps. The 857 image hits a
 general-protection loop that still needs looking at.
 
-Next: emulate the serial loader so Programmer.exe can load apps.
+

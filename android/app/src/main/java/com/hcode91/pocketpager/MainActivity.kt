@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private val logBuf = StringBuilder()
 
     private val osFile by lazy { File(filesDir, "os.bin") }
+    private val flashFile by lazy { File(filesDir, "flash.bin") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,6 +50,7 @@ class MainActivity : Activity() {
 
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         bar.addView(toolButton("Load OS") { pickOs() }, weight())
+        bar.addView(toolButton("Load Flash") { pickFlash() }, weight())
         bar.addView(toolButton("Reset") { emulator?.resetRequested = true }, weight())
         bar.addView(toolButton("Log") { showLog(true) }, weight())
         root.addView(bar)
@@ -181,25 +183,69 @@ class MainActivity : Activity() {
     }
 
     private fun showWelcome() {
-        statusView.text = "Tap \"Load OS\" and choose a RIM OS image (Pager957.bin, Pager950.bin, Pager857.bin or Pager850.bin)."
+        statusView.text = "Tap \"Load OS\" and choose a RIM OS image (Pager957.bin, Pager950.bin, Pager857.bin or Pager850.bin). " +
+            "Then use \"Load Flash\" to import an 8 MB flash image with apps and games installed."
     }
 
-    private fun pickOs() {
+    private fun pick(req: Int) {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
         }
-        startActivityForResult(i, REQ_OS)
+        startActivityForResult(i, req)
+    }
+
+    private fun pickOs() = pick(REQ_OS)
+
+    private fun pickFlash() {
+        if (emulator == null) {
+            Toast.makeText(this, "Load an OS image first", Toast.LENGTH_LONG).show()
+            return
+        }
+        pick(REQ_FLASH)
+    }
+
+    private fun saveFlash() {
+        val data = emulator?.dirtyFlash() ?: return
+        try {
+            val tmp = File(filesDir, "flash.tmp")
+            tmp.writeBytes(data)
+            tmp.renameTo(flashFile)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not save flash: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun importFlash(bytes: ByteArray) {
+        val emu = emulator ?: return
+        if (bytes.size != Native.FLASH_SIZE) {
+            Toast.makeText(this, "Not a PocketPager flash image (must be exactly 8 MB)",
+                Toast.LENGTH_LONG).show()
+            return
+        }
+        emu.stop()
+        if (emu.loadFlash(bytes)) {
+            flashFile.writeBytes(bytes)
+            Toast.makeText(this, "Flash loaded", Toast.LENGTH_SHORT).show()
+        }
+        emu.start()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_OS || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
             val bytes = contentResolver.openInputStream(uri)!!.use { it.readBytes() }
-            if (startEmulator(bytes)) osFile.writeBytes(bytes)
+            when (requestCode) {
+                REQ_OS -> {
+                    // A new OS starts from a freshly formatted device.
+                    flashFile.delete()
+                    if (startEmulator(bytes)) osFile.writeBytes(bytes)
+                }
+                REQ_FLASH -> importFlash(bytes)
+            }
         } catch (e: Exception) {
             Toast.makeText(this, "Could not read file: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -211,6 +257,8 @@ class MainActivity : Activity() {
         return try {
             val emu = Emulator(bytes)
             emu.onFrame = { lcd.postInvalidate() }
+            if (flashFile.length() == Native.FLASH_SIZE.toLong())
+                emu.loadFlash(flashFile.readBytes())
             emulator = emu
             lcd.emulator = emu
             emu.start()
@@ -224,6 +272,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         emulator?.stop()
+        saveFlash()
     }
 
     override fun onResume() {
@@ -240,5 +289,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_OS = 1
+        private const val REQ_FLASH = 2
     }
 }

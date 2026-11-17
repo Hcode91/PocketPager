@@ -4,9 +4,9 @@ An Android emulator for the RIM 850, 857, 950 and 957 two-way pagers
 (Intel 386EX based, OS 2.x). It emulates the hardware and boots the real
 OS image.
 
-**Status: early.** The 957/950/850 OS images boot fully: radio DSP (faked),
-both flash chips, RTC, LCD and the cradle serial port are all emulated.
-Apps aren't loaded into flash yet, so the screen stays blank.
+**Status: games run.** On the 957, the OS boots to the home screen, the
+real RIM Programmer can install apps over the emulated cradle port, and
+games such as RimVaders launch and play with the keyboard and trackwheel.
 See [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ## Using it
@@ -15,7 +15,20 @@ See [docs/HARDWARE.md](docs/HARDWARE.md).
 2. Tap **Load OS** and choose an OS image: `Pager957.bin`, `Pager950.bin`,
    `Pager857.bin` or `Pager850.bin` (from RIM's handheld SDK 2.x). The app
    descrambles it itself.
-3. **Log** shows what the emulated hardware is doing.
+3. Tap **Load Flash** and choose an 8 MB PocketPager flash image with apps
+   installed (made with `ppcli` + Programmer.exe, see below). The flash is
+   saved automatically, so this survives restarting the app. Loading a new
+   OS starts over from an empty device.
+4. Controls: ▲/▼ roll the trackwheel, **Click** presses it, **ESC** goes
+   back, plus the full thumb keyboard.
+5. **Log** shows what the emulated hardware is doing.
+
+### Making a flash image with apps
+
+Run `ppcli` with `PP_SERIAL=1 PP_PTYLINK=/tmp/pp_com PP_SAVEFLASH=flash.bin`,
+point Wine's COM1 at `/tmp/pp_com`, and load apps with RIM's
+`Programmer.exe` (e.g. `programmer load -p1 app.dll ...`). Stop `ppcli`
+with Ctrl+C and the flash is saved.
 
 No RIM firmware or software is included in this repository.
 
@@ -35,5 +48,9 @@ No RIM firmware or software is included in this repository.
   * `PP_DSPLOG=1` logs radio DSP traffic, `PP_UARTLOG=1` UART register access
   * `PP_SERIAL=1` runs in real time with COM2 on a pseudo-terminal
     (`PP_PTYLINK=/tmp/pp_com` makes a stable link to it, e.g. for Wine's COM1)
-  * `PP_SAVEFLASH=file` saves the OS/app flash chip at exit
+  * `PP_SAVEFLASH=file` saves both flash chips (8 MB) at exit,
+    `PP_LOADFLASH=file` starts from such an image
+  * `PP_INPUT="ms:key[:up],..."` scripted input (letters, `WU`/`WD` wheel,
+    `CL` click, `ESC`, `ENT`, `SP`, `BS`, `ALT`, `SH`),
+    `PP_SHOT="ms:file.pgm,..."` screenshots at given times
 * `android/` – the app (Kotlin + JNI).

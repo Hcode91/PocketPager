@@ -117,6 +117,45 @@ Java_com_hcode91_pocketpager_Native_stopped(JNIEnv *env, jclass cls, jlong h)
 	return pp_board_stopped((PPBoard *)(intptr_t)h) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jbyteArray JNICALL
+Java_com_hcode91_pocketpager_Native_getFlash(JNIEnv *env, jclass cls, jlong h)
+{
+	(void)cls;
+	jbyteArray arr = (*env)->NewByteArray(env, PP_FLASH_IMAGE_SIZE);
+	if (!arr) return NULL;
+	jbyte *p = (*env)->GetByteArrayElements(env, arr, NULL);
+	pp_board_get_flash((PPBoard *)(intptr_t)h, (uint8_t *)p);
+	(*env)->ReleaseByteArrayElements(env, arr, p, 0);
+	return arr;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_hcode91_pocketpager_Native_setFlash(JNIEnv *env, jclass cls, jlong h, jbyteArray data)
+{
+	(void)cls;
+	jsize len = (*env)->GetArrayLength(env, data);
+	jbyte *p = (*env)->GetByteArrayElements(env, data, NULL);
+	int ok = pp_board_set_flash((PPBoard *)(intptr_t)h, (const uint8_t *)p, (size_t)len);
+	(*env)->ReleaseByteArrayElements(env, data, p, JNI_ABORT);
+	if (ok) pp_board_reset((PPBoard *)(intptr_t)h);
+	return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_hcode91_pocketpager_Native_flashDirty(JNIEnv *env, jclass cls, jlong h)
+{
+	(void)env; (void)cls;
+	return pp_board_flash_dirty((PPBoard *)(intptr_t)h) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_hcode91_pocketpager_Native_factory(JNIEnv *env, jclass cls, jlong h)
+{
+	(void)env; (void)cls;
+	pp_board_factory((PPBoard *)(intptr_t)h);
+	pp_board_reset((PPBoard *)(intptr_t)h);
+}
+
 /* Returns new log lines since the last call, joined by newlines. */
 JNIEXPORT jstring JNICALL
 Java_com_hcode91_pocketpager_Native_drainLog(JNIEnv *env, jclass cls)
