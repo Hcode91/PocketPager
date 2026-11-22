@@ -57,7 +57,7 @@ typedef struct Frame {
     BBClass *initCls;
 } Frame;
 
-enum { TS_READY = 0, TS_SLEEP, TS_WAIT, TS_MONITOR, TS_JOIN, TS_DEAD, TS_EVENT };
+enum { TS_READY = 0, TS_SLEEP, TS_WAIT, TS_MONITOR, TS_JOIN, TS_DEAD, TS_EVENT, TS_CLINIT };
 
 typedef struct Thread {
     int id;
@@ -75,6 +75,7 @@ typedef struct Thread {
     int procId;
     ref_t tsd;          /* net.rim.vm.ThreadSpecificData */
     void *user;
+    void *initWait;     /* BBClass whose <clinit> another thread is running */
     struct Thread *next;
 } Thread;
 
@@ -96,6 +97,15 @@ typedef struct HostIf {
     void (*log)(void *ctx, const char *msg);
     uint64_t (*nowMs)(void *ctx);
 } HostIf;
+
+/* Per-process VM state: on the device every process has its own copy of the
+ * static fields and runs class initialisers separately. */
+typedef struct PState {
+    uint32_t **st; int nst;     /* statics by module gidx */
+    uint8_t *ci; int nci;       /* class init state by class gidx: 0 none, 1 running, 2 done */
+    struct Thread **cith;       /* thread running <clinit> */
+    uint32_t *locks; int nlocks; /* per-class lock objects (synchronized statics) */
+} PState;
 
 struct BBVM {
     char *dirs[8];
@@ -132,9 +142,20 @@ struct BBVM {
     void *nat;          /* native registry */
     void (*tick)(BBVM *vm);   /* timers etc., called by the scheduler */
     void *ext;          /* natives.c state */
+    PState **ps; int nps;
+    int nmodsG, nclsG;
 };
 
 BBVM *vm_new(void);
+PState *vm_ps(BBVM *vm, int pid);
+uint32_t *vm_statics(BBVM *vm, int pid, BBModule *m);
+static inline int vm_cinit_get(BBVM *vm, int pid, const BBClass *k) {
+    PState *p = (unsigned)pid < (unsigned)vm->nps ? vm->ps[pid] : NULL;
+    return p && k->gidx < p->nci ? p->ci[k->gidx] : 0;
+}
+void vm_cinit_set(BBVM *vm, int pid, const BBClass *k, int state, struct Thread *by);
+struct Thread *vm_cinit_thread(BBVM *vm, int pid, const BBClass *k);
+ref_t vm_class_lock(BBVM *vm, int pid, BBClass *k);
 void vm_free(BBVM *vm);
 void vm_add_dir(BBVM *vm, const char *dir);
 void vm_log(BBVM *vm, const char *fmt, ...);

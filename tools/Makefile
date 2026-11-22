@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but
 SRC = ../core/cpu/i386.c ../core/cpu/i8259.c ../core/cpu/i8254.c \
       ../core/rim/board.c ../core/rim/scramble.c ppcli.c
 BBOS = ../core/bbos/cod.c ../core/bbos/vm.c ../core/bbos/interp.c ../core/bbos/disasm.c \
-       ../core/bbos/natives.c ../core/bbos/natives_rim.c ../core/bbos/natives_vm.c ../core/bbos/natives_sys.c ../core/bbos/natives_crypto.c
+       ../core/bbos/natives.c ../core/bbos/natives_rim.c ../core/bbos/natives_vm.c ../core/bbos/natives_sys.c ../core/bbos/natives_crypto.c ../core/bbos/natives_gfx.c ../core/bbos/natives_misc.c ../core/bbos/natives_font.c
 
 all: ppcli bbdump bbrun
 

@@ -202,7 +202,7 @@ static int cmp_rt(const void *a, const void *b) {
 static void fill_routine(BBModule *m, BBRoutine *r, uint16_t off) {
     const uint8_t *c = m->code;
     r->mod = m; r->off = off; r->vindex = -1; r->name = "";
-    if (off < 14 || off > m->codeSize) return;
+    if (off < 9 || off > m->codeSize) return;
     if (c[off - 5] > 1) {
         uint32_t h = off - 9u;
         r->type = rd16(c + h); r->proto = rd16(c + h + 2);
@@ -211,6 +211,7 @@ static void fill_routine(BBModule *m, BBRoutine *r, uint16_t off) {
         uint8_t pk = c[h + 8];
         r->nstack = pk >> 6; r->maxl = (pk >> 4) & 3; r->maxs = pk & 3;
     } else {
+        if (off < 14) return;
         uint32_t h = off - 14u;
         r->name = cod_name(m, rd16(c + h)); r->proto = rd16(c + h + 2); r->type = rd16(c + h + 4);
         r->size = rd16(c + h + 6); r->attr = rd16(c + h + 8);

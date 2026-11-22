@@ -104,6 +104,8 @@ static BBModule *load_module(BBVM *vm, const char *name) {
         BBModule *m = cod_parse(name, b, n, err, sizeof err);
         if (!m) { vm_log(vm, "load %s: %s", name, err); free(b); return NULL; }
         m->next = vm->mods; vm->mods = m;
+        m->gidx = vm->nmodsG++;
+        for (int c = 0; c < m->ncls; c++) m->cls[c].gidx = vm->nclsG++;
         init_statics(vm, m);
         if (vm->trace & 4) vm_log(vm, "loaded module %s (%d classes)", name, m->ncls);
         return m;
@@ -462,6 +464,12 @@ void vm_gc(BBVM *vm) {
     }
     for (BBModule *m = vm->mods; m; m = m->next)
         for (int i = 0; i < m->staticSize + 2; i++) mark_ref(vm, m->statics[i], &stk, &sn, &sc);
+    for (int p = 0; p < vm->nps; p++) if (vm->ps[p]) {
+        PState *ps = vm->ps[p];
+        for (BBModule *m = vm->mods; m; m = m->next)
+            if (m->gidx < ps->nst && ps->st[m->gidx])
+                for (int i = 0; i < m->staticSize + 2; i++) mark_ref(vm, ps->st[m->gidx][i], &stk, &sn, &sc);
+    }
     for (int i = 0; i < vm->nlits; i++) mark_ref(vm, vm->lits[i].r, &stk, &sn, &sc);
     for (Monitor *mo = vm->monitors; mo; mo = mo->next) mark_ref(vm, mo->obj, &stk, &sn, &sc);
     while (sn) {
@@ -493,6 +501,70 @@ void vm_gc(BBVM *vm) {
 
 /* ------------------------------------------------------------------ */
 /* statics                                                             */
+
+PState *vm_ps(BBVM *vm, int pid) {
+    if (pid < 0) pid = 0;
+    if (pid >= vm->nps) {
+        int n = pid + 64;
+        vm->ps = realloc(vm->ps, (size_t)n * sizeof *vm->ps);
+        memset(vm->ps + vm->nps, 0, (size_t)(n - vm->nps) * sizeof *vm->ps);
+        vm->nps = n;
+    }
+    if (!vm->ps[pid]) vm->ps[pid] = calloc(1, sizeof(PState));
+    return vm->ps[pid];
+}
+
+uint32_t *vm_statics(BBVM *vm, int pid, BBModule *m) {
+    PState *p = vm_ps(vm, pid);
+    if (m->gidx >= p->nst) {
+        int n = vm->nmodsG + 256;
+        p->st = realloc(p->st, (size_t)n * sizeof *p->st);
+        memset(p->st + p->nst, 0, (size_t)(n - p->nst) * sizeof *p->st);
+        p->nst = n;
+    }
+    if (!p->st[m->gidx]) {
+        size_t sz = (size_t)(m->staticSize + 2) * sizeof(uint32_t);
+        p->st[m->gidx] = malloc(sz);
+        memcpy(p->st[m->gidx], m->statics, sz);
+    }
+    return p->st[m->gidx];
+}
+
+void vm_cinit_set(BBVM *vm, int pid, const BBClass *k, int state, Thread *by) {
+    PState *p = vm_ps(vm, pid);
+    if (k->gidx >= p->nci) {
+        int n = vm->nclsG + 1024;
+        p->ci = realloc(p->ci, (size_t)n);
+        memset(p->ci + p->nci, 0, (size_t)(n - p->nci));
+        p->cith = realloc(p->cith, (size_t)n * sizeof *p->cith);
+        memset(p->cith + p->nci, 0, (size_t)(n - p->nci) * sizeof *p->cith);
+        p->nci = n;
+    }
+    p->ci[k->gidx] = (uint8_t)state;
+    p->cith[k->gidx] = by;
+}
+
+ref_t vm_class_lock(BBVM *vm, int pid, BBClass *k) {
+    if (!k) return 0;
+    PState *p = vm_ps(vm, pid);
+    if (k->gidx >= p->nlocks) {
+        int n = vm->nclsG + 1024;
+        p->locks = realloc(p->locks, (size_t)n * sizeof *p->locks);
+        memset(p->locks + p->nlocks, 0, (size_t)(n - p->nlocks) * sizeof *p->locks);
+        p->nlocks = n;
+    }
+    if (!p->locks[k->gidx]) {
+        ref_t o = vm_new_obj(vm, vm->cObject);
+        vm_obj(vm, o)->flags |= OF_PERM;
+        p->locks[k->gidx] = o;
+    }
+    return p->locks[k->gidx];
+}
+
+Thread *vm_cinit_thread(BBVM *vm, int pid, const BBClass *k) {
+    PState *p = (unsigned)pid < (unsigned)vm->nps ? vm->ps[pid] : NULL;
+    return p && k->gidx < p->nci ? p->cith[k->gidx] : NULL;
+}
 
 static void init_statics(BBVM *vm, BBModule *m) {
     const uint8_t *d = m->data;

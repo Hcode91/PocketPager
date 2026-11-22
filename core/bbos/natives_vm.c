@@ -86,6 +86,10 @@ NAT(ar_equalsArray) { /* (a, aoff, b, boff, len) */
     ret[0] = 0;
     if (!x || !y) { ret[0] = x == y; return NAT_OK; }
     uint32_t ao = a[1], bo = a[3], n = a[4];
+    if ((int32_t)n < 0) {   /* -1: compare whole arrays, lengths included */
+        if (x->len - ao != y->len - bo) return NAT_OK;
+        n = x->len - ao;
+    }
     if ((uint64_t)ao + n > x->len || (uint64_t)bo + n > y->len) return NAT_OK;
     int es = vm_elem_size(x->et);
     if (es != vm_elem_size(y->et)) return NAT_OK;

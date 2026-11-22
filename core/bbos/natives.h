@@ -48,4 +48,7 @@ extern const NatEnt kNativesRim[];
 extern const NatEnt kNativesVm[];
 extern const NatEnt kNativesSys[];
 extern const NatEnt kNativesCrypto[];
+extern const NatEnt kNativesGfx[];
+extern const NatEnt kNativesMisc[];
+extern const NatEnt kNativesFont[];
 #endif

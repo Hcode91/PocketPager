@@ -1,6 +1,7 @@
 /* bbrun: run a static method of a RIM Java module headlessly.
  *   bbrun -d dir [-d dir...] [-t mask] family class [method] */
 #include "../core/bbos/vm.h"
+#include "../core/bbos/bbgfx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,22 @@ int main(int argc, char **argv) {
             idleIters++;
             if (idleIters > idleMax) break;
         }
+    }
+    {
+        int w, h, fr;
+        const uint16_t *fb = bbgfx_framebuffer(&w, &h, &fr);
+        const char *out = getenv("BBSHOT") ? getenv("BBSHOT") : "/tmp/bbscreen.ppm";
+        FILE *f = fopen(out, "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", w, h);
+            for (int k = 0; k < w * h; k++) {
+                uint16_t c = fb[k];
+                unsigned char px[3] = { (unsigned char)((c >> 8) & 0xf8), (unsigned char)((c >> 3) & 0xfc), (unsigned char)(c << 3) };
+                fwrite(px, 1, 3, f);
+            }
+            fclose(f);
+        }
+        fprintf(stderr, "screen: %d frames, saved %s\n", fr, out);
     }
     fflush(stderr); printf("vm_run -> %d, %lld instructions%s%s\n", rc, vm->icount, vm->fatal ? ", fatal: " : "", vm->fatal ? vm->fatalMsg : "");
     for (Thread *x = vm->threads; x; x = x->next) {

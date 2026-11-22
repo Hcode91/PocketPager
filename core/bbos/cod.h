@@ -97,7 +97,7 @@ typedef struct BBClass {
     int nslots;         /* total instance slots incl. super */
     int vtsize;
     BBRoutine **vtable;
-    int initState;      /* 0 none, 1 running, 2 done */
+    int gidx;           /* VM-wide class number (per-process init state) */
     void *classObj;
     void *rt;           /* runtime extras */
 } BBClass;
@@ -121,7 +121,8 @@ typedef struct BBModule {
     int nmref; BBMemberRef *mrefs;
     int nfix; BBFixup *fix; /* sorted by offset */
     uint16_t staticSize;
-    uint32_t *statics;      /* module static area (slots) */
+    uint32_t *statics;      /* initial static area (each process gets a copy) */
+    int gidx;               /* VM-wide module number */
     uint16_t o_typelists, o_ifrefs;
     struct BBModule *next;
 } BBModule;

@@ -380,20 +380,16 @@ NAT(cls_newInstance0) {
     UNUSED;
     BBClass *k = class_of(vm, a[0]);
     if (!k) { vm_throw(vm, t, "java.lang.InstantiationException", NULL); return NAT_THROWN; }
-    if (k->initState != 2) {
-        uint32_t dummy[2];
-        (void)dummy;
-        if (!vm_init_class(vm, t, k)) {
-            /* <clinit> pushed: run it to completion before constructing */
-            int base = t->nfr - 1;
-            while (t->nfr > base && !vm->fatal) { int rc = vm_run_thread(vm, t, 1000000, base); if (rc < 0) return NAT_THROWN; if (t->state != TS_READY) break; }
-        }
-    }
+    /* <clinit> (pushed as a frame, or run by another thread): re-run afterwards */
+    if (vm_cinit_get(vm, t->procId, k) != 2 && !vm_init_class(vm, t, k)) return t->pendingEx ? NAT_THROWN : NAT_BLOCK;
     ref_t o = vm_new_obj(vm, k);
     BBRoutine *init = vm_find_method(vm, k, "<init>", "");
     if (init && init->cls == k) {
-        uint32_t args[1] = { o };
-        if (vm_call(vm, t, init, args, 1, NULL) < 0) return NAT_THROWN;
+        /* the constructor runs as an ordinary frame; when it returns the
+         * caller's stack ends just above a[0], which now holds the object */
+        a[0] = o;
+        if (!vm_push_call(vm, t, init, &o, 1)) return NAT_THROWN;
+        return NAT_CALLED;
     }
     ret[0] = o;
     return NAT_OK;
@@ -670,7 +666,7 @@ NativeFn natives_lookup(BBVM *vm, BBRoutine *r) {
     snprintf(nm, sizeof nm, "%s.%s", r->cls ? r->cls->full : "?", r->name);
     vm_sig(vm, r->mod, r->proto, !r->isStatic, sig, sizeof sig);
     snprintf(full, sizeof full, "%s(%s)", nm, sig);
-    static const NatEnt *tables[] = { kNativesLang, kNativesRim, kNativesVm, kNativesSys, kNativesCrypto, NULL };
+    static const NatEnt *tables[] = { kNativesLang, kNativesRim, kNativesVm, kNativesSys, kNativesCrypto, kNativesGfx, kNativesMisc, kNativesFont, NULL };
     for (int ti = 0; tables[ti]; ti++) for (const NatEnt *e = tables[ti]; e->name; e++) if (!strcmp(e->name, full)) return e->fn;
     for (int ti = 0; tables[ti]; ti++) for (const NatEnt *e = tables[ti]; e->name; e++) if (!strcmp(e->name, nm)) return e->fn;
     if (g_logMissing) { vm_log(vm, "native missing: %s", full); if ((vm->trace & 128) && vm->cur) vm_backtrace(vm, vm->cur); }

@@ -163,7 +163,108 @@ int nat_sha1(const uint8_t *p, size_t n, uint8_t out[20]) {
     Dg d = { 0 }; d.alg = D_SHA1; dg_reset(&d); dg_update(&d, p, n); return dg_final(&d, out);
 }
 
+/* ------------------------------------------------------------------ */
+/* FIPS 186-2 general purpose random number generator (Appendix 3.1)
+ * with the SHA-1 based G function. The context is a byte[]:
+ * [0] b (key bytes), [1] buffered count, [2..21] buffered output,
+ * [24..87] XKEY, [88..151] XSEED, [152] XSEED in use, [153] reuse XSEED. */
+
+#define FX_B 0
+#define FX_N 1
+#define FX_BUF 2
+#define FX_KEY 24
+#define FX_SEED 88
+#define FX_HAS 152
+#define FX_EVERY 153
+#define FX_SIZE 156
+
+static uint32_t rol32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+static void fips_g(const uint8_t *c, int b, uint8_t out[20]) {
+    uint8_t blk[64] = { 0 };
+    memcpy(blk, c, (size_t)b);
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)blk[4 * i] << 24 | blk[4 * i + 1] << 16 | blk[4 * i + 2] << 8 | blk[4 * i + 3];
+    for (int i = 16; i < 80; i++) w[i] = rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    uint32_t h[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
+    uint32_t A = h[0], B = h[1], C = h[2], D = h[3], E = h[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) { f = (B & C) | (~B & D); k = 0x5A827999; }
+        else if (i < 40) { f = B ^ C ^ D; k = 0x6ED9EBA1; }
+        else if (i < 60) { f = (B & C) | (B & D) | (C & D); k = 0x8F1BBCDC; }
+        else { f = B ^ C ^ D; k = 0xCA62C1D6; }
+        uint32_t tmp = rol32(A, 5) + f + E + k + w[i];
+        E = D; D = C; C = rol32(B, 30); B = A; A = tmp;
+    }
+    h[0] += A; h[1] += B; h[2] += C; h[3] += D; h[4] += E;
+    for (int i = 0; i < 5; i++) { out[4 * i] = (uint8_t)(h[i] >> 24); out[4 * i + 1] = (uint8_t)(h[i] >> 16); out[4 * i + 2] = (uint8_t)(h[i] >> 8); out[4 * i + 3] = (uint8_t)h[i]; }
+}
+/* big-endian add of a (n bytes) into acc (b bytes, right aligned) */
+static void be_add(uint8_t *acc, int b, const uint8_t *x, int n, unsigned carry) {
+    for (int i = 0; i < b; i++) {
+        unsigned v = acc[b - 1 - i] + carry + (i < n ? x[n - 1 - i] : 0);
+        acc[b - 1 - i] = (uint8_t)v; carry = v >> 8;
+    }
+}
+static void fips_step(uint8_t *ctx) {
+    int b = ctx[FX_B];
+    uint8_t xval[64], x[20];
+    memcpy(xval, ctx + FX_KEY, (size_t)b);
+    if (ctx[FX_HAS]) { be_add(xval, b, ctx + FX_SEED, b, 0); if (!ctx[FX_EVERY]) ctx[FX_HAS] = 0; }
+    fips_g(xval, b, x);
+    be_add(ctx + FX_KEY, b, x, 20, 1);    /* XKEY = 1 + XKEY + x mod 2^b */
+    memcpy(ctx + FX_BUF, x, 20);
+    ctx[FX_N] = 20;
+}
+
+NAT(fips_initialize) {   /* static (byte[] key, off, len, byte[] seed, off, len, boolean) */
+    UNUSED;
+    Obj *k = vm_obj(vm, a[0]), *sd = vm_obj(vm, a[3]);
+    BBClass *cls = vm_find_class_anywhere(vm, "net.rim.device.api.crypto.NativeFIPSPRNG");
+    if (!cls) { ret[0] = 0; return NAT_OK; }
+    ref_t cr = vm_new_array(vm, BT_BYTE, NULL, 1, FX_SIZE);
+    uint8_t *ctx = (uint8_t *)vm_obj(vm, cr)->d;
+    int len = (int)a[2];
+    if (len > 64) len = 64;
+    if (len < 0) len = 0;
+    int b = len ? len : 20;
+    ctx[FX_B] = (uint8_t)b;
+    if (k && len) memcpy(ctx + FX_KEY, (uint8_t *)k->d + a[1], (size_t)len);
+    else for (int i = 0; i < b; i++) ctx[FX_KEY + i] = (uint8_t)rand();
+    if (sd && (int)a[5] > 0) {
+        int sl = (int)a[5] > b ? b : (int)a[5];
+        memcpy(ctx + FX_SEED + (b - sl), (uint8_t *)sd->d + a[4], (size_t)sl);
+        ctx[FX_HAS] = 1; ctx[FX_EVERY] = (uint8_t)(a[6] != 0);
+    }
+    ref_t o = vm_new_obj(vm, cls);
+    vm_obj(vm, o)->d[0] = cr;
+    if (getenv("BBFIPS")) { char hx[200] = ""; for (int i = 0; i < b; i++) sprintf(hx + 2 * i, "%02x", ctx[FX_KEY + i]); vm_log(vm, "fips init len=%d key=%s seed=%d", len, hx, ctx[FX_HAS]); }
+    ret[0] = o;
+    return NAT_OK;
+}
+NAT(fips_xorBytes) {   /* (byte[] buf, off, len) */
+    UNUSED;
+    Obj *self = vm_obj(vm, a[0]);
+    Obj *c = self ? vm_obj(vm, self->d[0]) : NULL;
+    Obj *buf = vm_obj(vm, a[1]);
+    if (!c || !buf) { vm_throw(vm, t, "java.lang.NullPointerException", NULL); return NAT_THROWN; }
+    uint8_t *ctx = (uint8_t *)c->d, *p = (uint8_t *)buf->d;
+    uint32_t off = a[2], n = a[3];
+    if (off > buf->len || n > buf->len - off) { vm_throw(vm, t, "java.lang.ArrayIndexOutOfBoundsException", NULL); return NAT_THROWN; }
+    for (uint32_t i = 0; i < n; i++) {
+        if (!ctx[FX_N]) fips_step(ctx);
+        p[off + i] ^= ctx[FX_BUF + 20 - ctx[FX_N]];
+        ctx[FX_N]--;
+    }
+    if (getenv("BBFIPS")) { char hx[100] = ""; for (uint32_t i = 0; i < n && i < 32; i++) sprintf(hx + 2 * i, "%02x", p[off + i]); vm_log(vm, "fips xor %u: %s", n, hx); }
+    return NAT_OK;
+}
+NAT(fips_version) { UNUSED; ret[0] = 1; return NAT_OK; }
+
 const NatEnt kNativesCrypto[] = {
+    { "net.rim.device.api.crypto.NativeFIPSPRNG.initialize", fips_initialize },
+    { "net.rim.device.api.crypto.NativeFIPSPRNG.xorBytes", fips_xorBytes },
+    { "net.rim.device.api.crypto.NativeFIPSPRNG.getVersion", fips_version },
     { "net.rim.device.api.crypto.NativeDigest.initializeSHA1", nd_sha1 },
     { "net.rim.device.api.crypto.NativeDigest.initializeSHA256", nd_sha256 },
     { "net.rim.device.api.crypto.NativeDigest.initializeMD5", nd_md5 },

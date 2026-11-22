@@ -225,7 +225,11 @@ static BBClass *cldc_class(BBVM *vm, const char *full) {
 
 void vm_throw(BBVM *vm, Thread *t, const char *cls, const char *msg) {
     BBClass *k = cldc_class(vm, cls);
-    if (vm->trace & 1) { vm_log(vm, "throw %s%s%s", cls, msg ? ": " : "", msg ? msg : ""); vm_backtrace(vm, t); }
+    {
+        static const char *exf = (const char *)-1;
+        if (exf == (const char *)-1) exf = getenv("BBEXTRACE");
+        if ((vm->trace & 1) || (exf && strstr(cls, exf))) { vm_log(vm, "throw %s%s%s [t%d]", cls, msg ? ": " : "", msg ? msg : "", t->id); vm_backtrace(vm, t); }
+    }
     if (!k) k = cldc_class(vm, "java.lang.Error");
     if (!k) { vm_fatal(vm, "no exception class %s (%s)", cls, msg ? msg : ""); t->pendingEx = 0; return; }
     ref_t e = vm_new_obj(vm, k);
@@ -252,7 +256,7 @@ void vm_backtrace(BBVM *vm, Thread *t) {
 
 static void release_frame(BBVM *vm, Thread *t, Frame *f) {
     if (f->lock) vm_monitor_exit(vm, t, f->lock);
-    if (f->clinit && f->initCls && f->initCls->initState == 1) f->initCls->initState = 2;
+    if (f->clinit && f->initCls && vm_cinit_get(vm, t->procId, f->initCls) == 1) vm_cinit_set(vm, t->procId, f->initCls, 2, NULL);
 }
 
 /* Unwind to a handler for t->pendingEx. Returns 1 if one was found,
@@ -289,17 +293,26 @@ static int unwind(BBVM *vm, Thread *t, int baseDepth) {
  * instruction afterwards). */
 int vm_init_class(BBVM *vm, Thread *t, BBClass *k) {
     if (!k) return 1;
-    if (k->initState == 2) return 1;
+    int pid = t->procId;
+    int st = vm_cinit_get(vm, pid, k);
+    if (st == 2) return 1;
     vm_link(vm, k);
-    if (k->initState == 1) return 1;   /* in progress (same or other thread) */
-    if (k->super && k->super->initState != 2) {
+    if (st == 1) {
+        /* in progress: recursive use on the same thread proceeds, other
+         * threads of the process wait until the initialiser finishes */
+        Thread *it = vm_cinit_thread(vm, pid, k);
+        if (!it || it == t || it->state == TS_DEAD) return 1;
+        t->state = TS_CLINIT; t->initWait = k;
+        return 0;
+    }
+    if (k->super && vm_cinit_get(vm, pid, k->super) != 2) {
         if (!vm_init_class(vm, t, k->super)) return 0;
     }
-    k->initState = 1;
-    if (!k->clinitOff) { k->initState = 2; return 1; }
+    vm_cinit_set(vm, pid, k, 1, t);
+    if (!k->clinitOff) { vm_cinit_set(vm, pid, k, 2, NULL); return 1; }
     BBRoutine *r = cod_routine_at(k->mod, k->clinitOff);
-    if (!r) { k->initState = 2; return 1; }
-    if (vm->trace & 16) vm_log(vm, "clinit %s", k->full);
+    if (!r) { vm_cinit_set(vm, pid, k, 2, NULL); return 1; }
+    if (vm->trace & 16) vm_log(vm, "clinit %s (pid %d)", k->full, pid);
     uint32_t *base = t->nfr ? top(t)->sp : t->stack;
     if (!push_frame(vm, t, r, base)) return 0;
     top(t)->clinit = 1;
@@ -529,7 +542,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
         case 0x0e: case 0x0f: case 0x10: case 0x11: case 0xdd: case 0x14:
             if (op == 0x14) {
                 /* clinit_wait: class already initialised by someone else? */
-                if (f->clinit && f->initCls && f->initCls->initState == 2) { do_return(vm, t, 0); continue; }
+                if (f->clinit && f->initCls && vm_cinit_get(vm, t->procId, f->initCls) == 2) { do_return(vm, t, 0); continue; }
             }
             f->ip++; continue;
         case 0x12: /* synch: synchronized instance method */
@@ -537,7 +550,8 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
             f->lock = f->lv[0]; f->ip++; continue;
         case 0x13: { /* synch_static */
             BBClass *k = vm_cls_ref(vm, m, 0, m->code[o]);
-            ref_t co = vm_class_obj(vm, k);
+            /* static state is per process, and so is the lock guarding it */
+            ref_t co = vm_class_lock(vm, t->procId, k);
             if (!vm_monitor_enter(vm, t, co)) return 0;
             f->lock = co; f->ip++; continue;
         }
@@ -652,18 +666,19 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                     k = vm_cls_direct(vm, m, mo, co);
                 }
                 if (!sm || addr < 0) { vm_log(vm, "unresolved static at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchFieldError", m->name); }
-                in->p = &sm->statics[addr];
+                in->p = sm;
+                in->b = addr;
                 in->a = side_add(k);
                 in->op |= RESOLVED;
             }
             {
                 BBClass *k = g_side[in->a];
-                if (k && k->initState != 2 && !(f->clinit && f->initCls == k)) {
+                if (k && vm_cinit_get(vm, t->procId, k) != 2 && !(f->clinit && f->initCls == k)) {
                     f->sp = sp;
                     if (!vm_init_class(vm, t, k)) { if (t->pendingEx) goto exception; continue; }
                 }
             }
-            uint32_t *p = in->p;
+            uint32_t *p = vm_statics(vm, t->procId, (BBModule *)in->p) + in->b;
             switch (op) {
             case 0x69: case 0x6a: p[0] = *--sp; break;
             case 0x6b: case 0x6c: sp -= 2; p[0] = sp[0]; p[1] = sp[1]; break;
@@ -839,11 +854,11 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
             BBClass *k = in->p;
             switch (op) {
             case 0xb8: case 0xb9:
-                if (k->initState != 2) { f->sp = sp; if (!vm_init_class(vm, t, k)) { if (t->pendingEx) goto exception; continue; } }
+                if (vm_cinit_get(vm, t->procId, k) != 2) { f->sp = sp; if (!vm_init_class(vm, t, k)) { if (t->pendingEx) goto exception; continue; } }
                 *sp++ = vm_new_obj(vm, k);
                 break;
             case 0xba: case 0xbb:
-                if (k->initState != 2) { f->sp = sp; if (!vm_init_class(vm, t, k)) { if (t->pendingEx) goto exception; continue; } }
+                if (vm_cinit_get(vm, t->procId, k) != 2) { f->sp = sp; if (!vm_init_class(vm, t, k)) { if (t->pendingEx) goto exception; continue; } }
                 break;
             case 0xbf: case 0xc0: sp[-1] = sp[-1] ? (uint32_t)vm_instanceof(vm, sp[-1], k) : 0; break;
             case 0xc1: case 0xc2:
@@ -888,7 +903,12 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
             ref_t e = *--sp;
             if (!e) NPE();
             t->pendingEx = e;
-            if (vm->trace & 1) { Obj *eo = vm_obj(vm, e); vm_log(vm, "athrow %s", eo && eo->cls ? eo->cls->full : "?"); vm_backtrace(vm, t); }
+            {
+                Obj *eo = vm_obj(vm, e);
+                static const char *exf = (const char *)-1;
+                if (exf == (const char *)-1) exf = getenv("BBEXTRACE");
+                if ((vm->trace & 1) || (exf && eo && eo->cls && strstr(eo->cls->full, exf))) { vm_log(vm, "athrow %s [t%d]", eo && eo->cls ? eo->cls->full : "?", t->id); vm_backtrace(vm, t); }
+            }
             f->sp = sp;
             goto exception;
         }
@@ -943,7 +963,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
         case 0x1e: f->sp = sp; do_return(vm, t, 2); continue;
         case 0x1f: case 0x21: f->sp = sp; do_return(vm, t, 0); continue;
         case 0x20: /* clinit_return */
-            if (f->initCls) f->initCls->initState = 2;
+            if (f->initCls) vm_cinit_set(vm, t->procId, f->initCls, 2, NULL);
             f->sp = sp; do_return(vm, t, 0); continue;
 
         /* ---- invocation ---- */
@@ -1064,7 +1084,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                 break;
             case 0x07: case 0x08: {
                 BBRoutine *r = in->p;
-                if (r->cls && r->cls->initState != 2 && !(f->clinit && f->initCls == r->cls)) {
+                if (r->cls && vm_cinit_get(vm, t->procId, r->cls) != 2 && !(f->clinit && f->initCls == r->cls)) {
                     if (!vm_init_class(vm, t, r->cls)) { if (t->pendingEx) goto exception; continue; }
                 }
                 rc = do_invoke(vm, t, f, r, r->nargs);
@@ -1156,6 +1176,12 @@ static void wake(BBVM *vm) {
         case TS_SLEEP:
             if (now >= t->wakeAt) { t->state = TS_READY; t->waitCount = -1; }
             break;
+        case TS_CLINIT: {
+            BBClass *k = t->initWait;
+            Thread *it = k ? vm_cinit_thread(vm, t->procId, k) : NULL;
+            if (!k || vm_cinit_get(vm, t->procId, k) != 1 || !it || it->state == TS_DEAD) { t->state = TS_READY; t->initWait = NULL; }
+            break;
+        }
         case TS_WAIT:
             if (t->wakeAt && now >= t->wakeAt) t->state = TS_MONITOR;
             if (t->interrupted) t->state = TS_MONITOR;

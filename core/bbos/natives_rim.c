@@ -246,6 +246,32 @@ NAT(proc_getCodeSectionNumber) {
     char nm[256];
     vm_string_utf8(vm, a[0], nm, sizeof nm);
     ret[0] = (uint32_t)nat_module_handle(vm, nm);
+    if (!ret[0] && getenv("BBMODMISS")) { vm_log(vm, "module not found: %s", nm); vm_backtrace(vm, t); }
+    return NAT_OK;
+}
+/* handle of the eldest sibling (the module name without its "-N" suffix) */
+static int eldest_handle(BBVM *vm, int h) {
+    NatState *s = nat_state(vm);
+    if (h < 1 || h > s->nmods) return 0;
+    char base[256];
+    snprintf(base, sizeof base, "%s", s->modNames[h - 1]);
+    char *d = strrchr(base, '-');
+    if (d && d[1]) { char *e; strtol(d + 1, &e, 10); if (!*e) *d = 0; }
+    int r = nat_module_handle(vm, base);
+    return r ? r : h;
+}
+NAT(proc_getEldestSibling) { UNUSED; ret[0] = (uint32_t)eldest_handle(vm, (int)a[0]); return NAT_OK; }
+NAT(proc_getModuleHandleCS) { UNUSED; ret[0] = a[0]; return NAT_OK; }
+NAT(proc_getCodeSectionNumber2) {   /* (handle, sibling index) */
+    UNUSED;
+    NatState *s = nat_state(vm);
+    int e = eldest_handle(vm, (int)a[0]);
+    ret[0] = (uint32_t)e;
+    if (e && (int)a[1] > 0) {
+        char nm[300];
+        snprintf(nm, sizeof nm, "%s-%d", s->modNames[e - 1], (int)a[1]);
+        ret[0] = (uint32_t)nat_module_handle(vm, nm);
+    }
     return NAT_OK;
 }
 NAT(proc_classForName) { /* classForName(String, int handle) */
@@ -266,6 +292,7 @@ NAT(cmm_getModuleHandle) {
     char nm[256];
     vm_string_utf8(vm, a[0], nm, sizeof nm);
     ret[0] = (uint32_t)nat_module_handle(vm, nm);
+    if (!ret[0] && getenv("BBMODMISS")) vm_log(vm, "module not found: %s", nm);
     return NAT_OK;
 }
 NAT(cmm_getModuleHandleForClass) {
@@ -617,13 +644,33 @@ NAT(ret_two) { UNUSED; ret[0] = 2; return NAT_OK; }
 
 /* module hash: SHA-1 over the whole .cod image */
 int nat_sha1(const uint8_t *p, size_t n, uint8_t out[20]);
+/* SHA-1 of a module image, cached by module */
+static int module_hash(BBVM *vm, int h, uint8_t out[20]) {
+    static struct { BBModule *m; uint8_t h[20]; } cache[4096];
+    BBModule *m = nat_module_by_handle(vm, h);
+    if (!m) return 0;
+    unsigned i = (unsigned)(((uintptr_t)m >> 4) * 2654435761u) % 4096;
+    if (cache[i].m != m) { cache[i].m = m; nat_sha1(m->raw, m->rawSize, cache[i].h); }
+    memcpy(out, cache[i].h, 20);
+    return 1;
+}
 NAT(cmm_getModuleHash) {
     UNUSED;
-    BBModule *m = nat_module_by_handle(vm, (int)a[0]);
-    if (!m) { ret[0] = 0; return NAT_OK; }
+    uint8_t hh[20];
+    if (!module_hash(vm, (int)a[0], hh)) { ret[0] = 0; return NAT_OK; }
     ref_t arr = vm_new_array(vm, BT_BYTE, NULL, 1, 20);
-    nat_sha1(m->raw, m->rawSize, (uint8_t *)vm_obj(vm, arr)->d);
+    memcpy(vm_obj(vm, arr)->d, hh, 20);
     ret[0] = arr;
+    return NAT_OK;
+}
+NAT(cmm_getModuleHashInto) {   /* (handle, byte[] out) -> boolean */
+    UNUSED;
+    uint8_t hh[20];
+    Obj *o = vm_obj(vm, a[1]);
+    ret[0] = 0;
+    if (!o || !module_hash(vm, (int)a[0], hh)) return NAT_OK;
+    memcpy(o->d, hh, o->len < 20 ? o->len : 20);
+    ret[0] = 1;
     return NAT_OK;
 }
 
@@ -649,6 +696,9 @@ const NatEnt kNativesRim[] = {
     { "net.rim.vm.Process.destroy", proc_destroy },
     { "net.rim.vm.Process.getHeapSize(I)", proc_getHeapSize },
     { "net.rim.vm.Process.getCodeSectionNumber(Ljava.lang.String;)", proc_getCodeSectionNumber },
+    { "net.rim.vm.Process.getCodeSectionNumber(II)", proc_getCodeSectionNumber2 },
+    { "net.rim.vm.Process.getEldestSiblingCodeSectionNumber", proc_getEldestSibling },
+    { "net.rim.vm.Process.getModuleHandle(I)", proc_getModuleHandleCS },
     { "net.rim.vm.Process.classForName", proc_classForName },
     { "net.rim.vm.Process.markEventHandlerThread", nop },
     { "net.rim.vm.Process.bootComplete", nop },
@@ -706,5 +756,6 @@ const NatEnt kNativesRim[] = {
     { "net.rim.device.internal.system.InternalServices.deleteTimerByCookie", is_deleteTimerByCookie },
     { "net.rim.device.internal.applicationcontrol.ApplicationControlImpl.getCallingModulesPermission", ret_two },
     { "net.rim.device.api.system.CodeModuleManager.getModuleHash(I)", cmm_getModuleHash },
+    { "net.rim.device.api.system.CodeModuleManager.getModuleHash(I[B)", cmm_getModuleHashInto },
     { NULL, NULL }
 };
