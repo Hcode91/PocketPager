@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
                 fronted = 1;
                 int pid = -1;
                 for (Thread *x = vm->threads; x; x = x->next)
-                    if (x->state != TS_DEAD && x->nfr && !strcmp(x->fr[0].r->mod->name, lm)) { pid = x->procId; break; }
+                    if (x->state != TS_DEAD && x->nfr && !strncmp(x->fr[0].r->mod->name, lm, strlen(lm))) { pid = x->procId; break; }
                 BBClass *am = vm_find_class_anywhere(vm, "net.rim.device.api.system.ApplicationManager");
                 BBRoutine *get = am ? vm_find_method(vm, am, "getApplicationManager", "") : NULL;
                 Thread *lt = vm_new_thread(vm, 0);

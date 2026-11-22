@@ -116,7 +116,12 @@ int bbh_launch(const char *module) {
 int bbh_pid_of(const char *module) {
     if (!g_vm) return -1;
     for (Thread *x = g_vm->threads; x; x = x->next)
-        if (x->state != TS_DEAD && x->nfr && !strcmp(x->fr[0].r->mod->name, module)) return x->procId;
+        if (x->state != TS_DEAD && x->nfr) {
+            /* the process's first frame is in the module or one of its siblings (name-N) */
+            const char *n = x->fr[0].r->mod->name;
+            size_t l = strlen(module);
+            if (!strncmp(n, module, l) && (n[l] == 0 || (n[l] == '-' && n[l + 1] >= '0' && n[l + 1] <= '9'))) return x->procId;
+        }
     return -1;
 }
 

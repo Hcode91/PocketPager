@@ -637,7 +637,8 @@ NAT(bm_getARGB) {
     }
     return NAT_OK;
 }
-/* copyARGB(int[] argb, offset, scanLength, x, y, w, h, ?, ?) - write into this bitmap */
+/* copyARGB(int[] argb, colourBpp, alphaBpp, offset, scanLength, x, y, w, h) -
+ * write into this bitmap (and its alpha plane) */
 NAT(bm_copyARGB) {
     UNUSED;
     Surf s, al;
@@ -646,7 +647,7 @@ NAT(bm_copyARGB) {
     int hasAlpha = surf_bitmap(vm, bo->d[B_ALPHA], &al);
     Obj *d = vm_obj(vm, a[1]);
     if (!d) return NAT_OK;
-    int off = (int)a[2], scan = (int)a[3], x = (int)a[4], y = (int)a[5], w = (int)a[6], h = (int)a[7];
+    int off = (int)a[4], scan = (int)a[5], x = (int)a[6], y = (int)a[7], w = (int)a[8], h = (int)a[9];
     for (int yy = 0; yy < h; yy++) for (int xx = 0; xx < w; xx++) {
         int64_t i = (int64_t)off + (int64_t)yy * scan + xx;
         int sx = x + xx, sy = y + yy;
@@ -657,7 +658,22 @@ NAT(bm_copyARGB) {
     }
     return NAT_OK;
 }
-NAT(bm_getBppFromARGB) { UNUSED; ret[0] = 16; return NAT_OK; }
+/* getBppFromARGB(int[] argb, boolean alpha): colour depth needed (16), or
+ * the alpha depth: 0 all opaque, 1 only fully clear/opaque, 4 otherwise */
+NAT(bm_getBppFromARGB) {
+    UNUSED;
+    if (!a[1]) { ret[0] = 16; return NAT_OK; }
+    Obj *d = vm_obj(vm, a[0]);
+    int bpp = 0;
+    for (uint32_t i = 0; d && i < d->len; i++) {
+        uint32_t al = d->d[i] >> 24;
+        if (al == 255) continue;
+        if (al == 0) { if (bpp < 1) bpp = 1; }
+        else { bpp = 4; break; }
+    }
+    ret[0] = (uint32_t)bpp;
+    return NAT_OK;
+}
 NAT(bm_compare) {
     UNUSED;
     Surf x, y;
