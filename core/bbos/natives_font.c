@@ -223,6 +223,12 @@ static int draw_text(BBVM *vm, Thread *t, ref_t gr, const Text *tx, int32_t off,
         if (h == DS_HCENTER) x += (width - adv) / 2;
         else if (h == DS_RIGHT) x += width - adv;
     }
+    if (getenv("BBGFXLOG")) {
+        char buf[64]; int k = 0;
+        for (int32_t i = 0; i < len && k < 60; i++) { unsigned ch = text_at(tx, (uint32_t)(off + i)); buf[k++] = ch < 127 && ch >= 32 ? (char)ch : '?'; }
+        buf[k] = 0;
+        vm_log(vm, "drawText [p%d bmp %x %dx%d] .%s. at %d,%d flags %x w %d clip %d,%d-%d,%d t %d,%d col %06x font %d px k%d", t->procId, c.g->d[G_BITMAP], c.s.w, c.s.h, buf, x, y, flags, width, c.cx0, c.cy0, c.cx1, c.cy1, c.tx, c.ty, c.color, s.px, s.k);
+    }
     int baseline;
     switch (v) {
     case DS_BOTTOM: baseline = y - s.desc; break;

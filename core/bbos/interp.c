@@ -488,6 +488,7 @@ static int do_invoke(BBVM *vm, Thread *t, Frame *f, BBRoutine *r, int nargs) {
     }
     if (r->hook == 2 || is_native_routine(r)) {
         NativeFn fn = bind_native(vm, r);
+        if (vm->trace & 256) vm_log(vm, "native [t%d] %s.%s", t->id, r->cls ? r->cls->full : "?", r->name);
         uint32_t ret[2] = { 0, 0 };
         int st = fn(vm, t, args, ret);
         if (st == NAT_BLOCK) return 2;       /* re-run this instruction later */

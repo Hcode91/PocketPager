@@ -109,6 +109,29 @@ int main(int argc, char **argv) {
         rc = vm_run(vm, 200000);
         done += vm->icount - before;
         {
+            /* BBLAUNCH=module: once the boot has settled (BBLAUNCHAT
+             * instructions, default 120M), ask the application manager to
+             * launch that module, as tapping its icon would. */
+            static int launched;
+            const char *lm = getenv("BBLAUNCH");
+            long long at = getenv("BBLAUNCHAT") ? atoll(getenv("BBLAUNCHAT")) : 120000000;
+            if (lm && !launched && vm->icount >= at) {
+                launched = 1;
+                BBClass *am = vm_find_class_anywhere(vm, "net.rim.device.api.system.ApplicationManager");
+                BBRoutine *get = am ? vm_find_method(vm, am, "getApplicationManager", "") : NULL;
+                Thread *lt = vm_new_thread(vm, 0);
+                lt->procId = 1;
+                uint32_t r[2] = { 0, 0 };
+                if (get && vm_call(vm, lt, get, NULL, 0, r) >= 0 && r[0]) {
+                    Obj *o = vm_obj(vm, r[0]);
+                    BBRoutine *launch = vm_find_method(vm, o->cls, "launch", "Ljava.lang.String;");
+                    uint32_t args[2] = { r[0], vm_new_string(vm, lm) };
+                    int rc2 = launch ? vm_call(vm, lt, launch, args, 2, NULL) : -9;
+                    fprintf(stderr, "launch %s -> %d\n", lm, rc2);
+                } else fprintf(stderr, "launch %s: no application manager\n", lm);
+            }
+        }
+        {
             static long long dumpAt = -2;
             if (dumpAt == -2) dumpAt = getenv("BBDUMPAT") ? atoll(getenv("BBDUMPAT")) : -1;
             if (dumpAt >= 0 && vm->icount >= dumpAt) {

@@ -121,13 +121,17 @@ static inline uint32_t blend(uint32_t dst, uint32_t src, int a) {
 
 
 
+static void note_screen_bitmap(BBVM *vm, int pid, ref_t bmp);
 static int gctx(BBVM *vm, ref_t gr, GCtx *c) {
     Obj *g = vm_obj(vm, gr);
     memset(c, 0, sizeof *c);
     if (!g || g->kind != OK_INST || g->len < 64) return 0;
     c->g = g;
     ref_t bmp = g->d[G_BITMAP];
-    if (bmp) { if (!surf_bitmap(vm, bmp, &c->s)) return 0; }
+    if (bmp) {
+        if (!surf_bitmap(vm, bmp, &c->s)) return 0;
+        if (c->s.w == BB_SCREEN_W && c->s.h == BB_SCREEN_H && vm->cur) note_screen_bitmap(vm, vm->cur->procId, bmp);
+    }
     else { c->s.fb = g_fb; c->s.w = BB_SCREEN_W; c->s.h = BB_SCREEN_H; c->s.bpp = 16; c->s.stride = BB_SCREEN_W * 2; c->s.vm = vm; }
     c->cx0 = (int)g->d[G_CLIPX]; c->cy0 = (int)g->d[G_CLIPY];
     c->cx1 = c->cx0 + (int)g->d[G_CLIPW]; c->cy1 = c->cy0 + (int)g->d[G_CLIPH];
@@ -283,8 +287,55 @@ static int rect_of(BBVM *vm, ref_t r, int *x, int *y, int *w, int *h) {
 
 #define GC(c) GCtx c; if (!gctx(vm, a[0], &c)) return NAT_OK
 
+/* Each application process paints into its own backbuffer bitmap; the LCD
+ * shows the backbuffer of the visible process (InternalServices
+ * .setVisibleProcess), refreshed whenever the UI engine finishes a paint. */
+typedef struct BackBuf { int pid; ref_t bmp; } BackBuf;
+static BackBuf g_bb[256]; static int g_nbb;
+static int g_visiblePid = -1;
+
+static void present(BBVM *vm) {
+    if (getenv("BBGFXLOG")) { for (int i = 0; i < g_nbb; i++) vm_log(vm, "present: pid %d bmp %x%s", g_bb[i].pid, g_bb[i].bmp, g_bb[i].pid == g_visiblePid ? " (visible)" : ""); }
+    for (int i = 0; i < g_nbb; i++) if (g_bb[i].pid == g_visiblePid) {
+        Surf s;
+        if (!surf_bitmap(vm, g_bb[i].bmp, &s) || s.bpp != 16) return;
+        int w = s.w < BB_SCREEN_W ? s.w : BB_SCREEN_W, h = s.h < BB_SCREEN_H ? s.h : BB_SCREEN_H;
+        for (int y = 0; y < h; y++) {
+            uint8_t *r = surf_row(&s, y);
+            if (r) memcpy(g_fb + (size_t)y * BB_SCREEN_W, r, (size_t)w * 2);
+        }
+        g_frame++;
+        return;
+    }
+}
+
+/* the screen-sized bitmap a process painted last is what it shows */
+static void note_screen_bitmap(BBVM *vm, int pid, ref_t bmp) {
+    int i;
+    for (i = 0; i < g_nbb; i++) if (g_bb[i].pid == pid) break;
+    if (i == g_nbb) { if (g_nbb == 256) return; g_nbb++; }
+    if (g_bb[i].bmp != bmp) {
+        Obj *b = vm_obj(vm, bmp);
+        if (b) b->flags |= OF_PERM;
+    }
+    g_bb[i].pid = pid; g_bb[i].bmp = bmp;
+}
+
 NAT(g_createFrontbuffer) { UNUSED; return NAT_OK; }
-NAT(g_createBackbuffer) { UNUSED; return NAT_OK; }
+NAT(g_createBackbuffer) {   /* (Bitmap) on a Graphics: draw into it */
+    UNUSED;
+    Obj *g = vm_obj(vm, a[0]);
+    if (g && g->len > G_BITMAP) g->d[G_BITMAP] = a[1];
+    return NAT_OK;
+}
+NAT(g_getDirtyRegion) {   /* (XYRect): the engine finished painting */
+    UNUSED;
+    Obj *r = vm_obj(vm, a[1]);
+    if (r && r->len >= 4) { r->d[0] = 0; r->d[1] = 0; r->d[2] = BB_SCREEN_W; r->d[3] = BB_SCREEN_H; }
+    if (t->procId == g_visiblePid) present(vm);
+    return NAT_OK;
+}
+NAT(g_setVisibleProcess) { UNUSED; g_visiblePid = (int)a[1]; if (getenv("BBGFXLOG")) vm_log(vm, "visible pid %d (%d) caller pid %d, %d backbuffers", (int)a[0], (int)a[1], t->procId, g_nbb); present(vm); return NAT_OK; }
 NAT(g_resetStack) {
     UNUSED;
     Obj *g = vm_obj(vm, a[0]);
@@ -314,7 +365,7 @@ NAT(g_pushRegionR) {
 }
 NAT(g_popContext) { UNUSED; pop_ctx(vm, a[0]); return NAT_OK; }
 
-NAT(g_fillRect) { UNUSED; GC(c); fill(&c, (int)a[1] + c.tx, (int)a[2] + c.ty, (int)a[3], (int)a[4], c.color, c.alpha); return NAT_OK; }
+NAT(g_fillRect) { UNUSED; GC(c); if (getenv("BBGFXLOG")) vm_log(vm, "fillRect %d,%d %dx%d clip %d,%d-%d,%d t %d,%d col %06x a %d bmp %d", (int)a[1], (int)a[2], (int)a[3], (int)a[4], c.cx0, c.cy0, c.cx1, c.cy1, c.tx, c.ty, c.color, c.alpha, c.s.fb == NULL); fill(&c, (int)a[1] + c.tx, (int)a[2] + c.ty, (int)a[3], (int)a[4], c.color, c.alpha); return NAT_OK; }
 NAT(g_drawRect) {
     UNUSED; GC(c);
     int x = (int)a[1] + c.tx, y = (int)a[2] + c.ty, w = (int)a[3], h = (int)a[4];
@@ -397,7 +448,13 @@ NAT(g_copyArea) { /* (x, y, w, h, dx, dy) */
     ret[0] = 1;
     return NAT_OK;
 }
-NAT(g_updateDisplay) { UNUSED; g_frame++; return NAT_OK; }
+NAT(g_updateDisplay) {
+    UNUSED;
+    Obj *g = vm_obj(vm, a[0]);
+    if (g && g->len > G_BITMAP && g->d[G_BITMAP]) { if (t->procId == g_visiblePid) present(vm); }
+    else g_frame++;
+    return NAT_OK;
+}
 NAT(g_isRopSupported) { UNUSED; ret[0] = 1; return NAT_OK; }
 NAT(g_getNearestColor) { UNUSED; ret[0] = rgb565_to_rgb(rgb_to_565(a[1])); return NAT_OK; }
 NAT(g_fitsInCache) { UNUSED; ret[0] = 1; return NAT_OK; }
@@ -663,6 +720,8 @@ NAT(disp_props) { UNUSED; ret[0] = 0; return NAT_OK; }
 const NatEnt kNativesGfx[] = {
     { "net.rim.device.api.ui.Graphics.createFrontbufferSurface", g_createFrontbuffer },
     { "net.rim.device.api.ui.Graphics.createBackbufferSurface", g_createBackbuffer },
+    { "net.rim.device.api.ui.GraphicsInternal.getDirtyRegion0", g_getDirtyRegion },
+    { "net.rim.device.internal.system.InternalServices.setVisibleProcessImpl", g_setVisibleProcess },
     { "net.rim.device.api.ui.Graphics.resetStack", g_resetStack },
     { "net.rim.device.api.ui.Graphics.pushContext(IIIIII)", g_pushContext6 },
     { "net.rim.device.api.ui.Graphics.pushContext(Lnet.rim.device.api.ui.XYRect;II)", g_pushContextR },

@@ -286,6 +286,7 @@ NAT(su_words) {
     return NAT_OK;
 }
 
+
 const NatEnt kNativesMisc[] = {
     { "net.rim.device.api.math.Fixed32.div(II)", fixed32_div },
     { "net.rim.device.internal.system.InternalServices.getBootRomMetrics", bootrom_metrics },

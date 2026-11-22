@@ -28,7 +28,8 @@ NAT(arr_extend) {
 NAT(arr_isContiguous) { UNUSED; ret[0] = 1; return NAT_OK; }
 NAT(arr_allocContiguousByteArray) { UNUSED; ret[0] = vm_new_array(vm, BT_BYTE, NULL, 1, a[0]); return NAT_OK; }
 NAT(arr_maxContiguous) { UNUSED; ret[0] = 8u << 20; return NAT_OK; }
-NAT(arr_getSectionSize) { UNUSED; Obj *o = vm_obj(vm, a[0]); ret[0] = o ? o->len : 0; return NAT_OK; }
+/* elements of this array type that fit in one 64 KB allocation section */
+NAT(arr_getSectionSize) { UNUSED; Obj *o = vm_obj(vm, a[0]); int es = o ? vm_elem_size(o->et) : 1; ret[0] = 65536u / (uint32_t)(es > 0 ? es : 4); return NAT_OK; }
 
 NAT(mem_objectToInt) { UNUSED; ret[0] = a[0]; return NAT_OK; }
 NAT(mem_intToObject) { UNUSED; ret[0] = vm_obj(vm, a[0]) ? a[0] : 0; return NAT_OK; }
