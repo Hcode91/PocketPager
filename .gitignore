@@ -12,3 +12,7 @@ android/local.properties
 *.dll
 *.rar
 android/.kotlin/
+tools/bbdump
+tools/bbrun
+*.cod
+*.debug
