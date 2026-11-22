@@ -46,4 +46,6 @@ int nat_messages_pending(void);
 extern const NatEnt kNativesLang[];
 extern const NatEnt kNativesRim[];
 extern const NatEnt kNativesVm[];
+extern const NatEnt kNativesSys[];
+extern const NatEnt kNativesCrypto[];
 #endif

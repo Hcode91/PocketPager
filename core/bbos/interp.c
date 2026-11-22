@@ -226,6 +226,7 @@ static BBClass *cldc_class(BBVM *vm, const char *full) {
 void vm_throw(BBVM *vm, Thread *t, const char *cls, const char *msg) {
     BBClass *k = cldc_class(vm, cls);
     if (vm->trace & 1) { vm_log(vm, "throw %s%s%s", cls, msg ? ": " : "", msg ? msg : ""); vm_backtrace(vm, t); }
+    if (!k) k = cldc_class(vm, "java.lang.Error");
     if (!k) { vm_fatal(vm, "no exception class %s (%s)", cls, msg ? msg : ""); t->pendingEx = 0; return; }
     ref_t e = vm_new_obj(vm, k);
     if (msg) {
@@ -519,7 +520,9 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
         uint32_t *sp = f->sp;
         int op = in->op & OPMASK;
         vm->icount++;
-        if (vm->trace & 32) vm_log(vm, "[%d] %s.%s @%u %s sp=%d", t->id, f->r->cls ? f->r->cls->name : "?", f->r->name, in->pc, cod_op_name(op), (int)(sp - f->lv - f->p->nlocals));
+        if ((vm->trace & 32) || (vm->traceFilter && f->r->cls && strstr(f->r->cls->full, vm->traceFilter)))
+            vm_log(vm, "[%d] %s.%s @%u %s sp=%d top=%08x %08x", t->id, f->r->cls ? f->r->cls->name : "?", f->r->name, in->pc, cod_op_name(op),
+                   (int)(sp - f->lv - f->p->nlocals), sp > f->lv + f->p->nlocals ? sp[-1] : 0, sp > f->lv + f->p->nlocals + 1 ? sp[-2] : 0);
         uint32_t o = in->pc + 1u + (op >= 0x100);
         switch (op) {
         /* ---- frame entry markers ---- */
@@ -606,7 +609,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                     BBClass *k = member_class(vm, m, mr);
                     slot = k ? field_slot_by_name(vm, k, mr->name) : -1;
                 }
-                if (slot < 0) { vm_fatal(vm, "unresolved field at %s @%u", m->name, in->pc); return -1; }
+                if (slot < 0) { vm_log(vm, "unresolved field at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchFieldError", m->name); }
                 in->a = slot;
                 in->op |= RESOLVED;
             }
@@ -648,7 +651,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                     sm = vm_mod_ord(vm, m, mo);
                     k = vm_cls_direct(vm, m, mo, co);
                 }
-                if (!sm || addr < 0) { vm_fatal(vm, "unresolved static at %s @%u", m->name, in->pc); return -1; }
+                if (!sm || addr < 0) { vm_log(vm, "unresolved static at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchFieldError", m->name); }
                 in->p = &sm->statics[addr];
                 in->a = side_add(k);
                 in->op |= RESOLVED;
@@ -820,7 +823,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                 BBClass *k;
                 if (fx && fx->kind == FX_CLASS) k = vm_resolve_cref(vm, m, (int)fx->idx);
                 else k = vm_cls_ref(vm, m, lib ? modbyte(m, o) : 0, m->code[o + lib]);
-                if (!k) { vm_fatal(vm, "unresolved class operand at %s @%u", m->name, in->pc); return -1; }
+                if (!k) { vm_log(vm, "unresolved class operand at %s @%u", m->name, in->pc); THROW("java.lang.NoClassDefFoundError", m->name); }
                 in->p = k;
                 if (op == 0xc3 || op == 0xc4) {
                     uint32_t q = o + lib + 1;
@@ -967,7 +970,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                                 } }
                             if (found < 0) {
                                 if (r) { in->op = 0x03 | RESOLVED; in->p = r; in->b = r->nargs; goto resolved_inv; }
-                                vm_fatal(vm, "unresolved virtual %s.%s%s", k ? k->full : "?", mr->name, sig); return -1;
+                                vm_log(vm, "unresolved virtual %s.%s%s", k ? k->full : "?", mr->name, sig); THROW("java.lang.NoSuchMethodError", mr->name);
                             }
                             in->a = found;
                         } else in->a = r->vindex;
@@ -979,14 +982,14 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                     BBRoutine *r = mr ? resolve_member_routine(vm, m, mr, 0)
                                       : routine_in(vm, m, lib ? modbyte(m, o) : 0, rd16(m->code + o + lib));
                     in->p = r; in->b = m->code[o + lib + 2];
-                    if (!r) { vm_fatal(vm, "unresolved call at %s @%u", m->name, in->pc); return -1; }
+                    if (!r) { vm_log(vm, "unresolved call at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchMethodError", m->name); }
                     break;
                 }
                 case 0x07: case 0x08: {
                     int lib = op == 0x08;
                     BBRoutine *r = mr ? resolve_member_routine(vm, m, mr, 1)
                                       : routine_in(vm, m, lib ? modbyte(m, o) : 0, rd16(m->code + o + lib + 1));
-                    if (!r) { vm_fatal(vm, "unresolved static call at %s @%u", m->name, in->pc); return -1; }
+                    if (!r) { vm_log(vm, "unresolved static call at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchMethodError", m->name); }
                     in->p = r; in->b = r->nargs;
                     break;
                 }
@@ -994,7 +997,7 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
                     int lib = op == 0x0d;
                     BBRoutine *r = mr ? resolve_member_routine(vm, m, mr, 0)
                                       : routine_in(vm, m, lib ? modbyte(m, o) : 0, rd16(m->code + o + lib));
-                    if (!r) { vm_fatal(vm, "unresolved jumpspecial at %s @%u", m->name, in->pc); return -1; }
+                    if (!r) { vm_log(vm, "unresolved jumpspecial at %s @%u", m->name, in->pc); THROW("java.lang.NoSuchMethodError", m->name); }
                     in->p = r;
                     break;
                 }
@@ -1146,6 +1149,7 @@ static uint64_t sched_now(BBVM *vm) {
 
 /* Wake threads whose condition is met. */
 static void wake(BBVM *vm) {
+    if (vm->tick) vm->tick(vm);
     uint64_t now = sched_now(vm);
     for (Thread *t = vm->threads; t; t = t->next) {
         switch (t->state) {

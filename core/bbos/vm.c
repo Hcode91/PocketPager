@@ -455,6 +455,7 @@ void vm_gc(BBVM *vm) {
         mark_ref(vm, t->pendingEx, &stk, &sn, &sc);
         mark_ref(vm, t->waitObj, &stk, &sn, &sc);
         mark_ref(vm, t->joinTarget, &stk, &sn, &sc);
+        mark_ref(vm, t->tsd, &stk, &sn, &sc);
         uint32_t *top = t->nfr ? t->fr[t->nfr - 1].sp : t->stack;
         for (uint32_t *p = t->stack; p < top + 4 && p < t->stackEnd; p++) mark_ref(vm, *p, &stk, &sn, &sc);
         for (int f = 0; f < t->nfr; f++) mark_ref(vm, t->fr[f].lock, &stk, &sn, &sc);

@@ -16,3 +16,4 @@ tools/bbdump
 tools/bbrun
 *.cod
 *.debug
+tools/bbrun_asan

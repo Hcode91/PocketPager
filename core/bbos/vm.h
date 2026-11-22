@@ -73,6 +73,7 @@ typedef struct Thread {
     ref_t joinTarget;
     int interrupted;
     int procId;
+    ref_t tsd;          /* net.rim.vm.ThreadSpecificData */
     void *user;
     struct Thread *next;
 } Thread;
@@ -124,10 +125,12 @@ struct BBVM {
 
     /* tracing */
     int trace;
+    const char *traceFilter;
     long long icount;
     int fatal;
     char fatalMsg[512];
     void *nat;          /* native registry */
+    void (*tick)(BBVM *vm);   /* timers etc., called by the scheduler */
     void *ext;          /* natives.c state */
 };
 

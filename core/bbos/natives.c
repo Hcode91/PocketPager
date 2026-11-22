@@ -336,7 +336,9 @@ NAT(sb_reverse) {
     ret[0] = a[0];
     return NAT_OK;
 }
-/* formatNumeric(buf, pos, radix, value) -> new length; buf has been grown to fit */
+/* formatNumeric(buf, pos, radix, value) -> characters written; the buffer
+ * array is grown in place when needed (RIM arrays can be resized). */
+void nat_resize_array(BBVM *vm, ref_t r, uint32_t n);
 NAT(sb_formatNumeric) {
     UNUSED;
     Obj *d = need(vm, t, a[0]); if (!d) return NAT_THROWN;
@@ -348,11 +350,17 @@ NAT(sb_formatNumeric) {
     uint64_t u = neg ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
     do { int dgt = (int)(u % (uint64_t)radix); tmp[n++] = (char)(dgt < 10 ? '0' + dgt : 'a' + dgt - 10); u /= (uint64_t)radix; } while (u);
     if (neg) tmp[n++] = '-';
-    for (int i = 0; i < n && pos < d->len; i++, pos++) {
+    if (pos + (uint32_t)n > d->len) {
+        uint32_t cap = d->len * 2 + 2;
+        if (cap < pos + (uint32_t)n) cap = pos + (uint32_t)n;
+        nat_resize_array(vm, a[0], cap);
+        d = vm_obj(vm, a[0]);
+    }
+    for (int i = 0; i < n; i++, pos++) {
         char c = tmp[n - 1 - i];
         if (d->et == BT_CHAR) ((uint16_t *)d->d)[pos] = (uint16_t)c; else ((uint8_t *)d->d)[pos] = (uint8_t)c;
     }
-    ret[0] = pos;
+    ret[0] = (uint32_t)n;
     return NAT_OK;
 }
 
@@ -498,6 +506,17 @@ NAT(su_regionMatches) { /* (String s, boolean ic, int toff, String o, int ooff, 
     }
     ret[0] = 1;
     return NAT_OK;
+}
+void nat_sb_append_ascii(BBVM *vm, ref_t sb, const char *s) {
+    Obj *b = vm_obj(vm, sb);
+    if (!b) return;
+    uint32_t n = (uint32_t)strlen(s), cnt = b->d[1];
+    Obj *v = sb_ensure(vm, sb, cnt + n, 0);
+    b = vm_obj(vm, sb);
+    for (uint32_t i = 0; i < n; i++) {
+        if (v->et == BT_CHAR) ((uint16_t *)v->d)[cnt + i] = (uint8_t)s[i]; else ((uint8_t *)v->d)[cnt + i] = (uint8_t)s[i];
+    }
+    b->d[1] = cnt + n;
 }
 static void sb_append_chars(BBVM *vm, ref_t sb, Obj *src, uint32_t from, uint32_t n) {
     Obj *b = vm_obj(vm, sb);
@@ -651,7 +670,7 @@ NativeFn natives_lookup(BBVM *vm, BBRoutine *r) {
     snprintf(nm, sizeof nm, "%s.%s", r->cls ? r->cls->full : "?", r->name);
     vm_sig(vm, r->mod, r->proto, !r->isStatic, sig, sizeof sig);
     snprintf(full, sizeof full, "%s(%s)", nm, sig);
-    static const NatEnt *tables[] = { kNativesLang, kNativesRim, kNativesVm, NULL };
+    static const NatEnt *tables[] = { kNativesLang, kNativesRim, kNativesVm, kNativesSys, kNativesCrypto, NULL };
     for (int ti = 0; tables[ti]; ti++) for (const NatEnt *e = tables[ti]; e->name; e++) if (!strcmp(e->name, full)) return e->fn;
     for (int ti = 0; tables[ti]; ti++) for (const NatEnt *e = tables[ti]; e->name; e++) if (!strcmp(e->name, nm)) return e->fn;
     if (g_logMissing) { vm_log(vm, "native missing: %s", full); if ((vm->trace & 128) && vm->cur) vm_backtrace(vm, vm->cur); }

@@ -9,6 +9,7 @@
 
 int main(int argc, char **argv) {
     BBVM *vm = vm_new();
+    vm->traceFilter = getenv("BBTRACE");
     int i = 1;
     long long budget = 50000000;
     int idleIters = 0, idleMax = 500;
@@ -105,9 +106,9 @@ int main(int argc, char **argv) {
             if (idleIters > idleMax) break;
         }
     }
-    printf("vm_run -> %d, %lld instructions%s%s\n", rc, vm->icount, vm->fatal ? ", fatal: " : "", vm->fatal ? vm->fatalMsg : "");
+    fflush(stderr); printf("vm_run -> %d, %lld instructions%s%s\n", rc, vm->icount, vm->fatal ? ", fatal: " : "", vm->fatal ? vm->fatalMsg : "");
     for (Thread *x = vm->threads; x; x = x->next) {
-        printf("thread %d state %d frames %d\n", x->id, x->state, x->nfr);
+        printf("thread %d state %d frames %d\n", x->id, x->state, x->nfr); fflush(stdout);
         if (x->nfr) vm_backtrace(vm, x);
     }
     return 0;

@@ -111,6 +111,19 @@ void vm_disasm(BBVM *vm, BBRoutine *r, FILE *out) {
             if (op == 0xc3 || op == 0xc4) { uint32_t q = o + lib + 1; snprintf(arg + strlen(arg), sizeof arg - strlen(arg), " else -> %d", (int)(q + (int16_t)rd16(c + q))); }
             break;
         }
+        case 0xa3: case 0xa4: {
+            int cnt = rd16(c + o), w = op == 0xa3 ? 2 : 4;
+            uint32_t q = o + 2;
+            size_t L = 0;
+            for (int i = 0; i < cnt && L + 40 < sizeof arg; i++) {
+                int32_t key = w == 2 ? (int16_t)rd16(c + q) : (int32_t)rd32(c + q);
+                q += w;
+                L += (size_t)snprintf(arg + L, sizeof arg - L, "%d(0x%x)->%d ", key, key, (int)(q + (int16_t)rd16(c + q)));
+                q += 2;
+            }
+            if (L + 20 < sizeof arg) snprintf(arg + L, sizeof arg - L, "default->%d", (int)(q + (int16_t)rd16(c + q)));
+            break;
+        }
         default:
             for (int i = 1 + (op >= 0x100); i < z && i < 8; i++) snprintf(arg + strlen(arg), sizeof arg - strlen(arg), "%02x ", c[pc + i]);
             break;

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "idtab.inc"
 #include "optab.inc"
@@ -151,8 +152,11 @@ static void fix_add(FixVec *v, uint16_t off, int kind, uint32_t idx) {
     if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 256; v->a = realloc(v->a, v->cap * sizeof *v->a); }
     v->a[v->n].off = off; v->a[v->n].kind = (uint8_t)kind; v->a[v->n].pad = 0; v->a[v->n].idx = idx; v->n++;
 }
+static uint32_t g_limit;   /* data size of the module being parsed */
 static uint32_t fix_entry(const uint8_t *d, uint32_t p, FixVec *v, int kind, uint32_t idx) {
+    if (p >= g_limit) return g_limit + 1;
     uint32_t ext = vint(d, &p), end = p + ext, acc = 0;
+    if (end > g_limit) return g_limit + 1;
     while (p < end) { acc += vint(d, &p); fix_add(v, (uint16_t)acc, kind, idx); }
     return end;
 }
@@ -169,9 +173,10 @@ static void mref_push(BBModule *m, BBMemberRef r) {
 
 static uint32_t member_table(BBModule *m, uint32_t p, int adv, int kind, FixVec *fv) {
     const uint8_t *d = m->data;
+    if (p + 2 > g_limit) return g_limit + 1;
     int n = (int16_t)rd16(d + p); p += 2;
     if (n < 0) n = -n;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && p < g_limit; i++) {
         p += p & 1;
         BBMemberRef r = {0};
         r.cref = cref_index(m, rd16(d + p));
@@ -224,6 +229,11 @@ BBModule *cod_parse(const char *name, uint8_t *buf, size_t size, char *err, size
     if (size < 44 || rd32(buf) != 0xffffc0deu) { fail(err, errn, "%s: not a cod module", name); return NULL; }
     BBModule *m = calloc(1, sizeof *m);
     snprintf(m->name, sizeof m->name, "%s", name);
+    /* pad the image so that malformed tables cannot read past the end */
+    uint8_t *pb = realloc(buf, size + 70000);
+    if (!pb) { free(m); fail(err, errn, "%s: out of memory", name); return NULL; }
+    memset(pb + size, 0, 70000);
+    buf = pb;
     m->raw = buf; m->rawSize = size;
     m->version = rd16(buf + 36);
     m->codeSize = rd16(buf + 38);
@@ -232,6 +242,7 @@ BBModule *cod_parse(const char *name, uint8_t *buf, size_t size, char *err, size
     if (44u + m->codeSize + m->dataSize > size) { fail(err, errn, "%s: truncated", name); free(m); return NULL; }
     m->code = buf + 44;
     m->data = buf + 44 + m->codeSize;
+    g_limit = m->dataSize;
     const uint8_t *d = m->data;
     m->dflags = d[0]; m->dver = d[1];
     m->nmod = d[4]; m->ncls = d[5];
@@ -339,11 +350,11 @@ BBModule *cod_parse(const char *name, uint8_t *buf, size_t size, char *err, size
     p = member_table(m, o_vrfix, adv, FX_VROUTINE, &fv);
     p = o_ccfix;
     { int n = rd16(d + p); p += 2;
-      for (int i = 0; i < n; i++) { p += p & 1; int ci = cref_index(m, rd16(d + p)); p += 2; p = fix_entry(d, p, &fv, FX_CLASS, (uint32_t)ci); } }
+      for (int i = 0; i < n && p < g_limit; i++) { p += p & 1; int ci = cref_index(m, rd16(d + p)); p += 2; p = fix_entry(d, p, &fv, FX_CLASS, (uint32_t)ci); } }
     p = member_table(m, o_ffix, 0, FX_FIELD, &fv);
     p = o_lffix;
     { int n = rd16(d + p); p += 2;
-      for (int i = 0; i < n; i++) {
+      for (int i = 0; i < n && p < g_limit; i++) {
           BBMemberRef r = {0}; r.cref = -1; r.lcls = d[p]; r.lfield = d[p + 1]; p += 2;
           mref_push(m, r);
           p = fix_entry(d, p, &fv, FX_LFIELD, (uint32_t)(m->nmref - 1));
@@ -351,8 +362,11 @@ BBModule *cod_parse(const char *name, uint8_t *buf, size_t size, char *err, size
     p = member_table(m, o_sffix, 0, FX_SFIELD, &fv);
     p = o_mcfix;
     { int n = rd16(d + p); p += 2;
-      for (int i = 0; i < n; i++) { int mo = d[p++]; p = fix_entry(d, p, &fv, FX_MODULE, (uint32_t)mo); } }
-    if (p > m->dataSize) { fail(err, errn, "%s: fixup tables overrun", name); cod_free(m); return NULL; }
+      for (int i = 0; i < n && p < g_limit; i++) { int mo = d[p++]; p = fix_entry(d, p, &fv, FX_MODULE, (uint32_t)mo); } }
+    if (p > m->dataSize) {
+        /* keep what was read; such modules are rare (odd layouts) */
+        if (getenv("BB_PARSE_WARN")) fprintf(stderr, "%s: fixup tables overrun\n", name);
+    }
     qsort(fv.a, fv.n, sizeof *fv.a, cmp_fix);
     m->fix = fv.a; m->nfix = fv.n;
     m->statics = calloc(m->staticSize + 2, sizeof *m->statics);

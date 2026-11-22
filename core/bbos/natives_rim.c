@@ -200,7 +200,11 @@ NAT(proc_start) {
     nt->state = TS_READY;
     uint32_t args[1] = { a[2] ? a[2] : vm_new_array(vm, BT_CLASS, vm->cString, 1, 0) };
     vm_push_call(vm, nt, r, args, r->nargs);
-    if (vm->trace & 4) vm_log(vm, "process %d started %s.%s on thread %d", p->id, k->full, r->name, nt->id);
+    if (vm->trace & 4) {
+        char al[256] = ""; Obj *ao = vm_obj(vm, args[0]);
+        for (uint32_t i = 0; ao && i < ao->len && strlen(al) < 200; i++) { char b[64]; vm_string_utf8(vm, ao->d[i], b, sizeof b); strcat(al, "\""); strcat(al, b); strcat(al, "\" "); }
+        vm_log(vm, "process %d started %s.%s on thread %d args %s", p->id, k->full, r->name, nt->id, al);
+    }
     ret[0] = 1;
     return NAT_OK;
 }
@@ -277,11 +281,20 @@ NAT(cmm_getModuleHandleForObject) {
     ret[0] = o && o->kind == OK_INST ? (uint32_t)nat_module_handle(vm, o->cls->mod->name) : 0;
     return NAT_OK;
 }
-NAT(cmm_getModuleName) {
+NAT(cmm_getModuleName) { /* (handle, index): index 0 is the module itself */
     UNUSED;
     NatState *s = nat_state(vm);
     int h = (int)a[0];
-    ret[0] = (h >= 1 && h <= s->nmods) ? vm_new_string(vm, s->modNames[h - 1]) : 0;
+    ret[0] = (h >= 1 && h <= s->nmods && a[1] == 0) ? vm_new_string(vm, s->modNames[h - 1]) : 0;
+    return NAT_OK;
+}
+NAT(cmm_getModuleAliasName) { /* (handle, index) -> alias or null */
+    UNUSED;
+    BBModule *m = nat_module_by_handle(vm, (int)a[0]);
+    ret[0] = 0;
+    if (!m) return NAT_OK;
+    uint32_t p = rd16(m->data + 28) + 2u * a[1];
+    if (p + 2 <= rd16(m->data + 6)) ret[0] = vm_new_string(vm, cod_cstr(m, rd16(m->data + p)));
     return NAT_OK;
 }
 NAT(cmm_getModuleVersion) {
@@ -567,6 +580,53 @@ NAT(cmm_getModuleData) {
     return NAT_OK;
 }
 
+
+/* ---------------- ThreadSpecificData ---------------- */
+NAT(tsd_get) { UNUSED; Thread *x = nat_thread_of(vm, a[0]); if (!x && a[0] == nat_thread_obj(vm, t)) x = t; ret[0] = x ? x->tsd : 0; return NAT_OK; }
+NAT(tsd_set) { UNUSED; Thread *x = nat_thread_of(vm, a[0]); if (!x && a[0] == nat_thread_obj(vm, t)) x = t; if (x) x->tsd = a[1]; return NAT_OK; }
+
+/* ---------------- OS timers: fire as messages on device 4 ---------------- */
+typedef struct OsTimer { int handle, cookie, periodic; uint64_t due, period; } OsTimer;
+static OsTimer g_tm[256]; static int g_ntm, g_nextTm = 1;
+static void timers_tick(BBVM *vm) {
+    uint64_t now = nat_now(vm);
+    for (int i = 0; i < g_ntm; i++) {
+        OsTimer *x = &g_tm[i];
+        if (now < x->due) continue;
+        nat_post_message(vm, 4, x->cookie, 0, 0, 0, 0, 0);
+        if (x->periodic && x->period) x->due += x->period; else { g_tm[i] = g_tm[--g_ntm]; i--; }
+    }
+}
+NAT(is_createTimer) { /* (long ms, boolean periodic, int cookie) -> handle */
+    UNUSED;
+    vm->tick = timers_tick;
+    int64_t ms = nat_arg64(a);
+    if (ms < 1) ms = 1;
+    if (g_ntm < 256) {
+        OsTimer *x = &g_tm[g_ntm++];
+        x->handle = g_nextTm++; x->cookie = (int)a[3]; x->periodic = (int)a[2];
+        x->period = (uint64_t)ms; x->due = nat_now(vm) + (uint64_t)ms;
+        ret[0] = (uint32_t)x->handle;
+    }
+    return NAT_OK;
+}
+NAT(is_deleteTimerByHandle) { UNUSED; for (int i = 0; i < g_ntm; i++) if (g_tm[i].handle == (int)a[0]) { g_tm[i] = g_tm[--g_ntm]; break; } return NAT_OK; }
+NAT(is_deleteTimerByCookie) { UNUSED; for (int i = 0; i < g_ntm; i++) if (g_tm[i].cookie == (int)a[0]) { g_tm[i] = g_tm[--g_ntm]; i--; } return NAT_OK; }
+NAT(ret_two) { UNUSED; ret[0] = 2; return NAT_OK; }
+
+
+/* module hash: SHA-1 over the whole .cod image */
+int nat_sha1(const uint8_t *p, size_t n, uint8_t out[20]);
+NAT(cmm_getModuleHash) {
+    UNUSED;
+    BBModule *m = nat_module_by_handle(vm, (int)a[0]);
+    if (!m) { ret[0] = 0; return NAT_OK; }
+    ref_t arr = vm_new_array(vm, BT_BYTE, NULL, 1, 20);
+    nat_sha1(m->raw, m->rawSize, (uint8_t *)vm_obj(vm, arr)->d);
+    ret[0] = arr;
+    return NAT_OK;
+}
+
 const NatEnt kNativesRim[] = {
     { "java.lang.Thread.currentThread", thr_currentThread },
     { "java.lang.Thread.start0", thr_start0 },
@@ -597,7 +657,8 @@ const NatEnt kNativesRim[] = {
     { "net.rim.device.api.system.CodeModuleManager.getModuleHandleForClassImpl", cmm_getModuleHandleForClass },
     { "net.rim.device.api.system.CodeModuleManager.getModuleHandleForObjectImpl", cmm_getModuleHandleForObject },
     { "net.rim.device.api.system.CodeModuleManager.getModuleName", cmm_getModuleName },
-    { "net.rim.device.api.system.CodeModuleManager.getModuleAliasName", cmm_getModuleName },
+    { "net.rim.device.api.system.CodeModuleManager.getModuleAliasName", cmm_getModuleAliasName },
+    { "net.rim.vm.Process.getModuleName", cmm_getModuleName },
     { "net.rim.device.api.system.CodeModuleManager.getModuleVersion", cmm_getModuleVersion },
     { "net.rim.device.api.system.CodeModuleManager.getModuleHandles", cmm_getModuleHandles },
     { "net.rim.device.api.system.CodeModuleManager.isValidHandle", cmm_isValidHandle },
@@ -638,5 +699,12 @@ const NatEnt kNativesRim[] = {
     { "net.rim.device.api.system.CodeModuleManager.getModuleData", cmm_getModuleData },
     { "net.rim.vm.Process.getModuleData", cmm_getModuleData },
     { "net.rim.vm.Process.isModuleEldestSibling", cs_isEldestSibling },
+    { "net.rim.vm.ThreadSpecificData.getData", tsd_get },
+    { "net.rim.vm.ThreadSpecificData.setData", tsd_set },
+    { "net.rim.device.internal.system.InternalServices.createTimer", is_createTimer },
+    { "net.rim.device.internal.system.InternalServices.deleteTimerByHandle", is_deleteTimerByHandle },
+    { "net.rim.device.internal.system.InternalServices.deleteTimerByCookie", is_deleteTimerByCookie },
+    { "net.rim.device.internal.applicationcontrol.ApplicationControlImpl.getCallingModulesPermission", ret_two },
+    { "net.rim.device.api.system.CodeModuleManager.getModuleHash(I)", cmm_getModuleHash },
     { NULL, NULL }
 };
