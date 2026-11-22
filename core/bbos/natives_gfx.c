@@ -130,6 +130,8 @@ static int gctx(BBVM *vm, ref_t gr, GCtx *c) {
     ref_t bmp = g->d[G_BITMAP];
     if (bmp) {
         if (!surf_bitmap(vm, bmp, &c->s)) return 0;
+        Obj *bo = vm_obj(vm, bmp);
+        if (bo && bo->len > B_ALPHA && bo->d[B_ALPHA]) c->hasA = surf_bitmap(vm, bo->d[B_ALPHA], &c->a);
         if (c->s.w == BB_SCREEN_W && c->s.h == BB_SCREEN_H && vm->cur) note_screen_bitmap(vm, vm->cur->procId, bmp);
     }
     else { c->s.fb = g_fb; c->s.w = BB_SCREEN_W; c->s.h = BB_SCREEN_H; c->s.bpp = 16; c->s.stride = BB_SCREEN_W * 2; c->s.vm = vm; }
@@ -146,10 +148,16 @@ static int gctx(BBVM *vm, ref_t gr, GCtx *c) {
     return 1;
 }
 
+/* drawing into a bitmap with an alpha plane also makes the pixels opaque */
+static inline void mark_alpha(GCtx *c, int x, int y, int a) {
+    if (a >= 255) surf_put(&c->a, x, y, 255);
+    else { int o = (int)surf_get(&c->a, x, y); surf_put(&c->a, x, y, (uint32_t)(o + (255 - o) * a / 255)); }
+}
 static inline void plot(GCtx *c, int x, int y, uint32_t rgb, int a) {
     if (x < c->cx0 || y < c->cy0 || x >= c->cx1 || y >= c->cy1) return;
     if (a >= 255) surf_put(&c->s, x, y, rgb);
     else if (a > 0) surf_put(&c->s, x, y, blend(surf_get(&c->s, x, y), rgb, a));
+    if (c->hasA && a > 0) mark_alpha(c, x, y, a);
 }
 
 static void fill(GCtx *c, int x, int y, int w, int h, uint32_t rgb, int a) {
@@ -160,6 +168,7 @@ static void fill(GCtx *c, int x, int y, int w, int h, uint32_t rgb, int a) {
     if (y1 > c->cy1) y1 = c->cy1;
     if (x0 >= x1 || y0 >= y1) return;
     if (c->s.bpp == 16 && a >= 255) {
+        if (c->hasA) for (int yy = y0; yy < y1; yy++) for (int xx = x0; xx < x1; xx++) surf_put(&c->a, xx, yy, 255);
         uint16_t px = rgb_to_565(rgb);
         for (int yy = y0; yy < y1; yy++) {
             uint8_t *r = surf_row(&c->s, yy);
@@ -317,8 +326,8 @@ static void draw_overlays(BBVM *vm) {
     }
 }
 
-static void present(BBVM *vm) {
-    if (getenv("BBGFXLOG")) { for (int i = 0; i < g_nbb; i++) vm_log(vm, "present: pid %d bmp %x%s", g_bb[i].pid, g_bb[i].bmp, g_bb[i].pid == g_visiblePid ? " (visible)" : ""); }
+static void present_why(BBVM *vm, const char *why) {
+    if (getenv("BBGFXLOG")) { for (int i = 0; i < g_nbb; i++) vm_log(vm, "present(%s): pid %d bmp %x%s", why, g_bb[i].pid, g_bb[i].bmp, g_bb[i].pid == g_visiblePid ? " (visible)" : ""); }
     for (int i = 0; i < g_nbb; i++) if (g_bb[i].pid == g_visiblePid) {
         Surf s;
         if (!surf_bitmap(vm, g_bb[i].bmp, &s) || s.bpp != 16) return;
@@ -356,14 +365,14 @@ NAT(g_getDirtyRegion) {   /* (XYRect): the engine finished painting */
     UNUSED;
     Obj *r = vm_obj(vm, a[1]);
     if (r && r->len >= 4) { r->d[0] = 0; r->d[1] = 0; r->d[2] = BB_SCREEN_W; r->d[3] = BB_SCREEN_H; }
-    if (t->procId == g_visiblePid) present(vm);
+    if (t->procId == g_visiblePid) present_why(vm, "dirty");
     return NAT_OK;
 }
 NAT(g_updateFromBackBuffer) {   /* (x, y, w, h, ?, ?) on the backbuffer's Graphics */
     UNUSED;
     Obj *g = vm_obj(vm, a[0]);
     if (g && g->len > G_BITMAP && g->d[G_BITMAP]) note_screen_bitmap(vm, t->procId, g->d[G_BITMAP]);
-    if (t->procId == g_visiblePid) present(vm);
+    if (t->procId == g_visiblePid) present_why(vm, "backbuffer");
     return NAT_OK;
 }
 static Overlay *ov_find(int id, int create) {
@@ -375,6 +384,11 @@ NAT(ov_set) {   /* static (display, id, Bitmap, x, y, visible) */
     UNUSED;
     Overlay *o = ov_find((int)a[1], 1);
     if (o) { o->bmp = a[2]; o->x = (int)a[3]; o->y = (int)a[4]; o->visible = (int)a[5]; Obj *b = vm_obj(vm, a[2]); if (b) b->flags |= OF_PERM; }
+    if (getenv("BBGFXLOG")) {
+        Surf s; Obj *b = vm_obj(vm, a[2]);
+        int ok = surf_bitmap(vm, a[2], &s);
+        vm_log(vm, "overlay %d bmp %x %dx%d bpp %d alpha %x at %d,%d vis %d", (int)a[1], a[2], ok ? s.w : -1, ok ? s.h : -1, ok ? s.bpp : -1, b && b->len > B_ALPHA ? b->d[B_ALPHA] : 0, (int)a[3], (int)a[4], (int)a[5]);
+    }
     return NAT_OK;
 }
 NAT(ov_delete) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->used = 0; return NAT_OK; }
@@ -385,7 +399,7 @@ NAT(ov_state) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->visible = 
 NAT(ov_update) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->bmp = a[2]; ret[0] = o != NULL; return NAT_OK; }
 NAT(ov_disable) { UNUSED; for (int i = 0; i < 16; i++) g_ov[i].visible = 0; return NAT_OK; }
 
-NAT(g_setVisibleProcess) { UNUSED; g_visiblePid = (int)a[1]; if (getenv("BBGFXLOG")) vm_log(vm, "visible pid %d (%d) caller pid %d, %d backbuffers", (int)a[0], (int)a[1], t->procId, g_nbb); present(vm); return NAT_OK; }
+NAT(g_setVisibleProcess) { UNUSED; g_visiblePid = (int)a[1]; if (getenv("BBGFXLOG")) vm_log(vm, "visible pid %d (%d) caller pid %d, %d backbuffers", (int)a[0], (int)a[1], t->procId, g_nbb); present_why(vm, "visible"); return NAT_OK; }
 NAT(g_resetStack) {
     UNUSED;
     Obj *g = vm_obj(vm, a[0]);
@@ -501,7 +515,7 @@ NAT(g_copyArea) { /* (x, y, w, h, dx, dy) */
 NAT(g_updateDisplay) {
     UNUSED;
     Obj *g = vm_obj(vm, a[0]);
-    if (g && g->len > G_BITMAP && g->d[G_BITMAP]) { if (t->procId == g_visiblePid) present(vm); }
+    if (g && g->len > G_BITMAP && g->d[G_BITMAP]) { if (t->procId == g_visiblePid) present_why(vm, "update"); }
     else g_frame++;
     return NAT_OK;
 }
@@ -516,6 +530,7 @@ static void blit(BBVM *vm, GCtx *c, int x, int y, int w, int h, ref_t bmp, int l
     Obj *bo = vm_obj(vm, bmp);
     int hasAlpha = surf_bitmap(vm, bo->d[B_ALPHA], &al);
     int trans = (int)bo->d[B_TRANS];
+    if (getenv("BBGFXLOG")) vm_log(vm, "blit %x %dx%d bpp %d alpha %d trans %x -> [%x %dx%d] %d,%d %dx%d from %d,%d ga %d", bmp, src.w, src.h, src.bpp, hasAlpha, trans, c->g->d[G_BITMAP], c->s.w, c->s.h, x, y, w, h, left, top, c->alpha);
     for (int yy = 0; yy < h; yy++) {
         int sy = top + yy, dy = y + yy;
         if (sy < 0 || sy >= src.h || dy < c->cy0 || dy >= c->cy1) continue;

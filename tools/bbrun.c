@@ -1,6 +1,7 @@
 /* bbrun: run a static method of a RIM Java module headlessly.
  *   bbrun -d dir [-d dir...] [-t mask] family class [method] */
 #include "../core/bbos/vm.h"
+#include "../core/bbos/natives.h"
 #include "../core/bbos/bbgfx.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,54 @@
 static BBVM *g_vm;
 static uint64_t g_idleMs, g_epoch = 1262304000000ull;   /* 2010-01-01 */
 static uint64_t virt_now(void *ctx) { (void)ctx; return g_epoch + (uint64_t)g_vm->icount / 25000 + g_idleMs; }
+
+static void save_screen(const char *out) {
+    int w, h, fr;
+    const uint16_t *fb = bbgfx_framebuffer(&w, &h, &fr);
+    FILE *f = fopen(out, "wb");
+    if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int k = 0; k < w * h; k++) {
+            uint16_t c = fb[k];
+            unsigned char px[3] = { (unsigned char)((c >> 8) & 0xf8), (unsigned char)((c >> 3) & 0xfc), (unsigned char)(c << 3) };
+            fwrite(px, 1, 3, f);
+        }
+        fclose(f);
+    }
+    fprintf(stderr, "screen: %d frames, saved %s\n", fr, out);
+}
+
+/* Scripted input (BBINPUT): comma-separated "<idle ticks>:<action>" items,
+ * run once the launched app is in front. Actions: k<c> types character c,
+ * enter, space, esc, click, up/down/left/right (trackball), shot (screenshot
+ * to /tmp/bbshot<N>.ppm). */
+enum { DEV_KEYPAD = 2, DEV_NAV = 27, KEY_DOWN = 513, KEY_REPEAT = 514, KEY_UP = 515, KEY_CHAR = 32768,
+       NAV_MOVE = 6913, NAV_CLICK = 6914, NAV_UNCLICK = 6915 };
+static int uptime_ms(void) { return (int)(virt_now(NULL) - g_epoch); }
+static void post_key(BBVM *vm, int ch) {
+    int kc = ch << 16;
+    nat_post_message(vm, DEV_KEYPAD, KEY_DOWN, ch, kc, uptime_ms(), 0, 0);
+    nat_post_message(vm, DEV_KEYPAD, KEY_CHAR, ch, 0, uptime_ms(), 0, 0);
+    nat_post_message(vm, DEV_KEYPAD, KEY_UP, ch, kc, uptime_ms() + 50, 0, 0);
+}
+static void post_nav(BBVM *vm, int ev, int dx, int dy) {
+    nat_post_message(vm, DEV_NAV, ev, 0, (-(dy << 16)) | (dx & 0xffff), 0x20000000 | uptime_ms(), 0, 0);
+}
+static void run_input(BBVM *vm, const char *act) {
+    static int nshot;
+    if (!strcmp(act, "enter")) post_key(vm, '\n');
+    else if (!strcmp(act, "space")) post_key(vm, ' ');
+    else if (!strcmp(act, "esc")) post_key(vm, 27);
+    else if (!strcmp(act, "menu")) post_key(vm, 0x1002);
+    else if (!strcmp(act, "click")) { post_nav(vm, NAV_CLICK, 0, 0); post_nav(vm, NAV_UNCLICK, 0, 0); }
+    else if (!strcmp(act, "up")) post_nav(vm, NAV_MOVE, 0, -1);
+    else if (!strcmp(act, "down")) post_nav(vm, NAV_MOVE, 0, 1);
+    else if (!strcmp(act, "left")) post_nav(vm, NAV_MOVE, -1, 0);
+    else if (!strcmp(act, "right")) post_nav(vm, NAV_MOVE, 1, 0);
+    else if (!strcmp(act, "shot")) { char p[64]; snprintf(p, sizeof p, "/tmp/bbshot%d.ppm", nshot++); save_screen(p); }
+    else if (act[0] == 'k' && act[1]) post_key(vm, (unsigned char)act[1]);
+    fprintf(stderr, "input: %s\n", act);
+}
 
 int main(int argc, char **argv) {
     BBVM *vm = vm_new();
@@ -164,6 +213,20 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "foreground pid %d -> %d\n", pid, rc2);
                 } else fprintf(stderr, "foreground: %s not running\n", lm);
             }
+            static const char *inp;
+            if (!inp) inp = getenv("BBINPUT");
+            if (inp && *inp && (!lm || fronted)) {
+                int delay = atoi(inp);
+                const char *c = strchr(inp, ':');
+                if (c && idleIters >= delay) {
+                    char act[32]; int k = 0;
+                    for (c++; *c && *c != ',' && k < 31; c++) act[k++] = *c;
+                    act[k] = 0;
+                    run_input(vm, act);
+                    idleIters = 0;
+                    inp = *c == ',' ? c + 1 : c;
+                }
+            }
         }
         {
             static long long dumpAt = -2;
@@ -185,22 +248,7 @@ int main(int argc, char **argv) {
             if (idleIters > idleMax) break;
         }
     }
-    {
-        int w, h, fr;
-        const uint16_t *fb = bbgfx_framebuffer(&w, &h, &fr);
-        const char *out = getenv("BBSHOT") ? getenv("BBSHOT") : "/tmp/bbscreen.ppm";
-        FILE *f = fopen(out, "wb");
-        if (f) {
-            fprintf(f, "P6\n%d %d\n255\n", w, h);
-            for (int k = 0; k < w * h; k++) {
-                uint16_t c = fb[k];
-                unsigned char px[3] = { (unsigned char)((c >> 8) & 0xf8), (unsigned char)((c >> 3) & 0xfc), (unsigned char)(c << 3) };
-                fwrite(px, 1, 3, f);
-            }
-            fclose(f);
-        }
-        fprintf(stderr, "screen: %d frames, saved %s\n", fr, out);
-    }
+    save_screen(getenv("BBSHOT") ? getenv("BBSHOT") : "/tmp/bbscreen.ppm");
     fflush(stderr); printf("vm_run -> %d, %lld instructions%s%s\n", rc, vm->icount, vm->fatal ? ", fatal: " : "", vm->fatal ? vm->fatalMsg : "");
     for (Thread *x = vm->threads; x; x = x->next) {
         printf("thread %d state %d frames %d\n", x->id, x->state, x->nfr); fflush(stdout);

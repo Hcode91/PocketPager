@@ -19,6 +19,8 @@ typedef struct GCtx {
     int tx, ty;
     uint32_t color;
     int alpha;
+    int hasA;                   /* the target bitmap has an alpha plane */
+    Surf a;
 } GCtx;
 
 enum { G_CLIPX = 19, G_CLIPY = 20, G_CLIPW = 21, G_CLIPH = 22, G_TX = 23, G_TY = 24,

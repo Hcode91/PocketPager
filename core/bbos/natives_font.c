@@ -235,7 +235,7 @@ static int draw_text(BBVM *vm, Thread *t, ref_t gr, const Text *tx, int32_t off,
     switch (v) {
     case DS_BOTTOM: baseline = y - s.desc; break;
     case DS_VCENTER: baseline = y - s.px / 2 + s.asc; break;
-    case DS_BASELINE: baseline = y; break;
+    case DS_BASELINE: case 8: baseline = y; break;   /* 8: baseline, as in DrawTextParam */
     default: baseline = y + s.asc; break;
     }
     return draw_glyphs(&c, &s, tx, off, len, x + c.tx, baseline + c.ty, maxw);
