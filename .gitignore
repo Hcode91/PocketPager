@@ -17,3 +17,5 @@ tools/bbrun
 *.cod
 *.debug
 tools/bbrun_asan
+tools/bbimport
+gmon.out

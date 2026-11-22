@@ -46,7 +46,7 @@ static void post_key(BBVM *vm, int ch) {
     nat_post_message(vm, DEV_KEYPAD, KEY_UP, ch, kc, uptime_ms() + 50, 0, 0);
 }
 static void post_nav(BBVM *vm, int ev, int dx, int dy) {
-    nat_post_message(vm, DEV_NAV, ev, 0, (-(dy << 16)) | (dx & 0xffff), 0x20000000 | uptime_ms(), 0, 0);
+    nat_post_message(vm, DEV_NAV, ev, (-(dy << 16)) | (dx & 0xffff), 0x20000000, uptime_ms(), 0, 0);
 }
 static void run_input(BBVM *vm, const char *act) {
     static int nshot;
@@ -57,8 +57,8 @@ static void run_input(BBVM *vm, const char *act) {
     else if (!strcmp(act, "click")) { post_nav(vm, NAV_CLICK, 0, 0); post_nav(vm, NAV_UNCLICK, 0, 0); }
     else if (!strcmp(act, "up")) post_nav(vm, NAV_MOVE, 0, -1);
     else if (!strcmp(act, "down")) post_nav(vm, NAV_MOVE, 0, 1);
-    else if (!strcmp(act, "left")) post_nav(vm, NAV_MOVE, -1, 0);
-    else if (!strcmp(act, "right")) post_nav(vm, NAV_MOVE, 1, 0);
+    else if (!strcmp(act, "left")) post_nav(vm, NAV_MOVE, -8, 0);
+    else if (!strcmp(act, "right")) post_nav(vm, NAV_MOVE, 8, 0);
     else if (!strcmp(act, "shot")) { char p[64]; snprintf(p, sizeof p, "/tmp/bbshot%d.ppm", nshot++); save_screen(p); }
     else if (act[0] == 'k' && act[1]) post_key(vm, (unsigned char)act[1]);
     fprintf(stderr, "input: %s\n", act);
@@ -214,11 +214,15 @@ int main(int argc, char **argv) {
                 } else fprintf(stderr, "foreground: %s not running\n", lm);
             }
             static const char *inp;
+            static int sinceInput;
             if (!inp) inp = getenv("BBINPUT");
+            sinceInput++;
             if (inp && *inp && (!lm || fronted)) {
+                /* delays count loop passes: about 10 ms of device time each */
                 int delay = atoi(inp);
                 const char *c = strchr(inp, ':');
-                if (c && idleIters >= delay) {
+                if (c && sinceInput >= delay) {
+                    sinceInput = 0;
                     char act[32]; int k = 0;
                     for (c++; *c && *c != ',' && k < 31; c++) act[k++] = *c;
                     act[k] = 0;

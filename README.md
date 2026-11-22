@@ -32,6 +32,28 @@ with Ctrl+C and the flash is saved.
 
 No RIM firmware or software is included in this repository.
 
+## Bold 9000 (BlackBerry OS 5)
+
+A second family runs RIM's later Java handhelds at the OS level: our own VM
+(`core/bbos`) loads RIM's `.cod` modules and runs the real OS 5.0 for the
+Bold 9000, with the device's native services written in C. BrickBreaker
+plays; other built-in games are in progress.
+
+1. In the app tap **Bold 9000 (BlackBerry OS 5)**.
+2. Tap **Import OS installer** and choose RIM's Windows installer for the
+   Bold 9000 (`9000M_PBr5.0.0_..._Wind.exe`). The app unpacks its 2,300
+   modules (about 100 MB); the installer is not kept.
+3. Pick a game. Controls: the trackball (drag to roll, tap to press), the
+   green/red call keys, Menu, Escape and the QWERTY keyboard (Shift and Alt
+   latch for the next key). A gamepad or keyboard works too: D-pad rolls,
+   A presses the trackball, B is Escape, Start is Menu.
+4. **Add apps** takes more `.cod` files or a `.zip` of them.
+
+Tools for this family: `tools/bbimport` (unpack an installer:
+`bbimport installer.exe outdir`), `tools/bbrun` (boot headlessly:
+`bbrun -d outdir net_rim_app_manager net.rim.device.api.system.ApplicationManagerApp`,
+with `BBLAUNCH=module` and `BBINPUT="10:menu,10:click,5:shot"` scripted input).
+
 ## Layout
 
 * `core/cpu` – 386 CPU, 8259 and 8254, from [tiny386](https://github.com/hchunhui/tiny386)
@@ -53,4 +75,6 @@ No RIM firmware or software is included in this repository.
   * `PP_INPUT="ms:key[:up],..."` scripted input (letters, `WU`/`WD` wheel,
     `CL` click, `ESC`, `ENT`, `SP`, `BS`, `ALT`, `SH`),
     `PP_SHOT="ms:file.pgm,..."` screenshots at given times
+* `core/bbos` – the BlackBerry OS family: `.cod` loader, RIM Java VM, device natives,
+  installer importer (`bbimport.c`) and the front-end API (`bbhost.c`).
 * `android/` – the app (Kotlin + JNI).

@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install zlib
+        run: sudo apt-get install -y zlib1g-dev
       - name: Build ppcli with gcc and clang
         run: |
           make -C tools CC=gcc
@@ -23,6 +25,7 @@ jobs:
             tools/ppcli
             tools/bbdump
             tools/bbrun
+            tools/bbimport
 
   android:
     name: Android APK

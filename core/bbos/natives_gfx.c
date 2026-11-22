@@ -776,6 +776,35 @@ NAT(ei_getGIFImage) { UNUSED; return ei_decode(vm, a[0], a[1], a[2]); }
 NAT(ei_getJPEGImage) { UNUSED; return ei_decode(vm, a[0], a[1], 0); }
 NAT(ei_getBMPImage) { UNUSED; return ei_decode(vm, a[0], a[1], 0); }
 
+/* drawImageInternal(x, y, w, h, EncodedImage, frame, left, top, decodeMode,
+ * scaledWidth, scaledHeight): draw part of the image, scaled to the given size */
+NAT(g_drawImage) {
+    UNUSED; GC(c);
+    const uint8_t *p; int n;
+    if (!ei_bytes(vm, a[5], &p, &n)) return NAT_OK;
+    int iw, ih, comp;
+    uint8_t *px = stbi_load_from_memory(p, n, &iw, &ih, &comp, 4);
+    if (!px) return NAT_OK;
+    int x = (int)a[1] + c.tx, y = (int)a[2] + c.ty, w = (int)a[3], h = (int)a[4];
+    int left = (int)a[7], top = (int)a[8];
+    int sw = (int)a[10], sh = (int)a[11];
+    if (sw <= 0 || sw > 8 * iw + 4096) sw = iw;
+    if (sh <= 0 || sh > 8 * ih + 4096) sh = ih;
+    for (int yy = 0; yy < h; yy++) {
+        int sy = top + yy;
+        if (sy < 0 || sy >= sh) continue;
+        int py = sy * ih / sh;
+        for (int xx = 0; xx < w; xx++) {
+            int sx = left + xx;
+            if (sx < 0 || sx >= sw) continue;
+            const uint8_t *q = px + ((size_t)py * iw + sx * iw / sw) * 4;
+            plot(&c, x + xx, y + yy, (uint32_t)q[0] << 16 | q[1] << 8 | q[2], q[3] * c.alpha / 255);
+        }
+    }
+    stbi_image_free(px);
+    return NAT_OK;
+}
+
 /* ------------------------------------------------------------------ */
 
 NAT(k_true) { UNUSED; ret[0] = 1; return NAT_OK; }
@@ -805,6 +834,7 @@ const NatEnt kNativesGfx[] = {
     { "net.rim.device.api.ui.Graphics.pushRegion(Lnet.rim.device.api.ui.XYRect;II)", g_pushRegionR2 },
     { "net.rim.device.api.ui.Graphics.pushRegion(Lnet.rim.device.api.ui.XYRect;)", g_pushRegionR },
     { "net.rim.device.api.ui.Graphics.popContext", g_popContext },
+    { "net.rim.device.api.ui.Graphics.drawImageInternal", g_drawImage },
     { "net.rim.device.api.ui.Graphics.fillRect(IIII)", g_fillRect },
     { "net.rim.device.api.ui.Graphics.fillRect32", g_fillRect32 },
     { "net.rim.device.api.ui.Graphics.drawRect(IIII)", g_drawRect },

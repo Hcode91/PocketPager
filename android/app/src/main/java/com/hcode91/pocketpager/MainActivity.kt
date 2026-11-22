@@ -54,6 +54,9 @@ class MainActivity : Activity() {
         bar.addView(toolButton("Reset") { emulator?.resetRequested = true }, weight())
         bar.addView(toolButton("Log") { showLog(true) }, weight())
         root.addView(bar)
+        root.addView(toolButton("Bold 9000 (BlackBerry OS 5)") {
+            startActivity(Intent(this, BlackBerryActivity::class.java))
+        })
 
         lcd = LcdView(this)
         root.addView(lcd, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
