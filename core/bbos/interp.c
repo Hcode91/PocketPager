@@ -481,7 +481,12 @@ static int64_t d2l(double d) {
 /* Invoke routine r with nargs slots on the caller's stack. */
 static int do_invoke(BBVM *vm, Thread *t, Frame *f, BBRoutine *r, int nargs) {
     uint32_t *args = f->sp - nargs;
-    if (is_native_routine(r)) {
+    if (!r->hook) {
+        NativeFn h = natives_hook(vm, r);
+        r->hook = h ? 2 : 1;
+        if (h) r->native = (void *)h;
+    }
+    if (r->hook == 2 || is_native_routine(r)) {
         NativeFn fn = bind_native(vm, r);
         uint32_t ret[2] = { 0, 0 };
         int st = fn(vm, t, args, ret);
@@ -516,6 +521,20 @@ static void do_return(BBVM *vm, Thread *t, int slots) {
     }
 }
 
+/* for traces: show short strings behind references */
+static void trace_str(BBVM *vm, uint32_t v, char *out, size_t n) {
+    if ((v & 0xf0000000u) != 0x60000000u) return;
+    Obj *o = vm_obj(vm, v);
+    if (!o || !(o->flags & OF_STRING)) return;
+    size_t k = 0;
+    out[k++] = '"';
+    for (uint32_t i = 0; i < o->len && k + 2 < n; i++) {
+        unsigned c = o->et == BT_CHAR ? ((uint16_t *)o->d)[i] : ((uint8_t *)o->d)[i];
+        out[k++] = c >= 32 && c < 127 ? (char)c : '?';
+    }
+    out[k++] = '"'; out[k] = 0;
+}
+
 int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
     vm->cur = t;
     if (t->pendingEx && t->nfr > baseDepth) goto exception;
@@ -534,8 +553,13 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
         int op = in->op & OPMASK;
         vm->icount++;
         if ((vm->trace & 32) || (vm->traceFilter && f->r->cls && strstr(f->r->cls->full, vm->traceFilter)))
-            vm_log(vm, "[%d] %s.%s @%u %s sp=%d top=%08x %08x", t->id, f->r->cls ? f->r->cls->name : "?", f->r->name, in->pc, cod_op_name(op),
-                   (int)(sp - f->lv - f->p->nlocals), sp > f->lv + f->p->nlocals ? sp[-1] : 0, sp > f->lv + f->p->nlocals + 1 ? sp[-2] : 0);
+        {
+            uint32_t v0 = sp > f->lv + f->p->nlocals ? sp[-1] : 0, v1 = sp > f->lv + f->p->nlocals + 1 ? sp[-2] : 0;
+            char s0[48] = "", s1[48] = "";
+            trace_str(vm, v0, s0, sizeof s0); trace_str(vm, v1, s1, sizeof s1);
+            vm_log(vm, "[%d] %s.%s @%u %s sp=%d top=%08x%s %08x%s", t->id, f->r->cls ? f->r->cls->name : "?", f->r->name, in->pc, cod_op_name(op),
+                   (int)(sp - f->lv - f->p->nlocals), v0, s0, v1, s1);
+        }
         uint32_t o = in->pc + 1u + (op >= 0x100);
         switch (op) {
         /* ---- frame entry markers ---- */
@@ -582,10 +606,12 @@ int vm_run_thread(BBVM *vm, Thread *t, long long budget, int baseDepth) {
         }
         case 0x2d: { /* arrayinit: push a new array initialised from the data section */
             uint16_t off = (uint16_t)(uintptr_t)in->p;
-            uint32_t n = (uint32_t)in->b;
+            /* the operand is the size of the data in bytes */
+            uint32_t es = (uint32_t)vm_elem_size(in->a), bytes = (uint32_t)in->b;
+            uint32_t n = es ? bytes / es : bytes;
             ref_t ar = vm_new_array(vm, in->a, NULL, 1, n);
             Obj *ao = vm_obj(vm, ar);
-            uint32_t bytes = n * (uint32_t)vm_elem_size(in->a);
+            bytes = n * es;
             if ((uint32_t)off + bytes <= m->dataSize) memcpy(ao->d, m->data + off, bytes);
             *sp++ = ar;
             break;
@@ -1184,7 +1210,7 @@ static void wake(BBVM *vm) {
         }
         case TS_WAIT:
             if (t->wakeAt && now >= t->wakeAt) t->state = TS_MONITOR;
-            if (t->interrupted) t->state = TS_MONITOR;
+            if (t->interrupted == 1) t->state = TS_MONITOR;
             break;
         case TS_MONITOR: {
             Monitor *m = vm_monitor(vm, t->waitObj, 1);

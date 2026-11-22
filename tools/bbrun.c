@@ -8,12 +8,21 @@
 #include <time.h>
 #include <dirent.h>
 
+/* Virtual clock: time advances with executed instructions (about 25 M per
+ * second, near the device's speed) and jumps ahead while every thread
+ * waits, so runs are reproducible and idle waits cost nothing. */
+static BBVM *g_vm;
+static uint64_t g_idleMs, g_epoch = 1262304000000ull;   /* 2010-01-01 */
+static uint64_t virt_now(void *ctx) { (void)ctx; return g_epoch + (uint64_t)g_vm->icount / 25000 + g_idleMs; }
+
 int main(int argc, char **argv) {
     BBVM *vm = vm_new();
+    g_vm = vm;
+    if (!getenv("BBREALTIME")) vm->host.nowMs = virt_now;
     vm->traceFilter = getenv("BBTRACE");
     int i = 1;
     long long budget = 50000000;
-    int idleIters = 0, idleMax = 500;
+    int idleIters = 0, idleMax = 200000;
     while (i < argc && argv[i][0] == '-') {
         if (!strcmp(argv[i], "-d") && i + 1 < argc) vm_add_dir(vm, argv[++i]);
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) vm->trace = (int)strtol(argv[++i], NULL, 0);
@@ -99,10 +108,22 @@ int main(int argc, char **argv) {
         long long before = vm->icount;
         rc = vm_run(vm, 200000);
         done += vm->icount - before;
+        {
+            static long long dumpAt = -2;
+            if (dumpAt == -2) dumpAt = getenv("BBDUMPAT") ? atoll(getenv("BBDUMPAT")) : -1;
+            if (dumpAt >= 0 && vm->icount >= dumpAt) {
+                dumpAt = -1;
+                fflush(stderr);
+                for (Thread *x = vm->threads; x; x = x->next) if (x->state != TS_DEAD) {
+                    printf("dump: thread %d pid %d state %d\n", x->id, x->procId, x->state); fflush(stdout);
+                    vm_backtrace(vm, x);
+                }
+            }
+        }
         if (rc == -3 || rc == -1) break;
         if (rc == 0) {   /* idle: everyone waiting */
-            struct timespec ts = { 0, 2 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
+            if (vm->host.nowMs) g_idleMs += 10;
+            else { struct timespec ts = { 0, 2 * 1000 * 1000 }; nanosleep(&ts, NULL); }
             idleIters++;
             if (idleIters > idleMax) break;
         }

@@ -209,7 +209,97 @@ NAT(nv_writeData) {   /* (id, byte[], off, len) */
 }
 NAT(nv_delete) { UNUSED; NvEnt *e = nv_find((int)a[0], 0); if (e) { free(e->data); *e = g_nv[--g_nnv]; } ret[0] = 1; return NAT_OK; }
 
+/* ---------------- assorted values the OS expects ---------------- */
+NAT(fixed32_div) {   /* 16.16 fixed point a / b */
+    UNUSED;
+    int32_t x = (int32_t)a[0], y = (int32_t)a[1];
+    if (!y) { vm_throw(vm, t, "java.lang.ArithmeticException", NULL); return NAT_THROWN; }
+    ret[0] = (uint32_t)(int32_t)(((int64_t)x << 16) / y);
+    return NAT_OK;
+}
+NAT(bootrom_metrics) { UNUSED; ref_t r = vm_new_array(vm, BT_BYTE, NULL, 1, 32); ret[0] = r; return NAT_OK; }
+NAT(perm_long_all) { UNUSED; nat_ret64(ret, -1); return NAT_OK; }
+NAT(perm_isFlagSet) {   /* (byte[] flags, bit) */
+    UNUSED;
+    Obj *o = vm_obj(vm, a[0]);
+    uint32_t bit = a[1];
+    ret[0] = o && bit / 8 < o->len ? (((uint8_t *)o->d)[bit / 8] >> (bit & 7)) & 1 : 1;
+    return NAT_OK;
+}
+NAT(empty_int_array) { UNUSED; ret[0] = vm_new_array(vm, BT_INT, NULL, 1, 0); return NAT_OK; }
+NAT(empty_obj_array) { UNUSED; ret[0] = vm_new_array(vm, BT_CLASS, vm->cObject, 1, 0); return NAT_OK; }
+NAT(k_zero) { UNUSED; ret[0] = 0; return NAT_OK; }
+NAT(k_100) { UNUSED; ret[0] = 100; return NAT_OK; }
+NAT(k_timeout) { UNUSED; ret[0] = 120; return NAT_OK; }
+NAT(os_api_version) { UNUSED; ret[0] = 0x0500; return NAT_OK; }
+
+static unsigned lc(unsigned c) {
+    if ((c >= 'A' && c <= 'Z') || (c >= 0xc0 && c <= 0xde && c != 0xd7)) return c + 32;
+    return c;
+}
+static int is_word(unsigned c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 0xc0 && c != 0xd7 && c != 0xf7);
+}
+/* StringMatch: patterns in slot 0, case sensitive flag in slot 2, index of
+ * the pattern that matched last in slot 4. KMPMatch(text, start) -> index */
+NAT(sm_match) {
+    UNUSED;
+    Obj *self = vm_obj(vm, a[0]);
+    Obj *txt = vm_obj(vm, a[1]);
+    ret[0] = (uint32_t)-1;
+    if (!self || !txt) return NAT_OK;
+    Obj *pats = vm_obj(vm, self->d[0]);
+    int cs = self->d[2] != 0;
+    Obj *arr = txt; uint32_t n = txt->len;
+    if (txt->kind == OK_INST) { arr = vm_obj(vm, txt->d[0]); n = txt->d[1]; }   /* StringBuffer */
+    if (!arr || !pats) return NAT_OK;
+    for (uint32_t i = a[2]; i < n; i++) {
+        for (uint32_t p = 0; p < pats->len; p++) {
+            Obj *ps = vm_obj(vm, pats->d[p]);
+            if (!ps || !ps->len || i + ps->len > n) continue;
+            uint32_t k = 0;
+            for (; k < ps->len; k++) {
+                unsigned x = nat_char(arr, i + k), y = nat_char(ps, k);
+                if (!cs) { x = lc(x); y = lc(y); }
+                if (x != y) break;
+            }
+            if (k == ps->len) { self->d[4] = p; ret[0] = i; return NAT_OK; }
+        }
+    }
+    return NAT_OK;
+}
+/* stringToWordsOrKeywords(String, int[] starts, int[] ends, int offset, boolean keywords) -> count */
+NAT(su_words) {
+    UNUSED;
+    Obj *s = vm_obj(vm, a[0]), *st = vm_obj(vm, a[1]), *en = vm_obj(vm, a[2]);
+    ret[0] = 0;
+    if (!s || !st || !en) return NAT_OK;
+    uint32_t k = a[3], cnt = 0;
+    for (uint32_t i = 0; i < s->len; ) {
+        while (i < s->len && !is_word(nat_char(s, i))) i++;
+        if (i >= s->len) break;
+        uint32_t b = i;
+        while (i < s->len && (is_word(nat_char(s, i)) || nat_char(s, i) == '\'')) i++;
+        if (k < st->len && k < en->len) { st->d[k] = b; en->d[k] = i; k++; cnt++; }
+    }
+    ret[0] = cnt;
+    return NAT_OK;
+}
+
 const NatEnt kNativesMisc[] = {
+    { "net.rim.device.api.math.Fixed32.div(II)", fixed32_div },
+    { "net.rim.device.internal.system.InternalServices.getBootRomMetrics", bootrom_metrics },
+    { "net.rim.device.internal.system.InternalServices.getOSAPIVersion", os_api_version },
+    { "net.rim.device.internal.applicationcontrol.ApplicationControlImpl.getModulePermissions", perm_long_all },
+    { "net.rim.device.internal.applicationcontrol.ApplicationControlImpl.isFlagSet", perm_isFlagSet },
+    { "net.rim.device.api.system.CodeModuleGroupManager.getGroupHandles", empty_int_array },
+    { "net.rim.vm.Monitor.getBlockedProcesses", empty_int_array },
+    { "net.rim.vm.Memory.getAllInstances", empty_obj_array },
+    { "net.rim.device.internal.system.BacklightInternal.getBrightnessDefault", k_100 },
+    { "net.rim.device.internal.system.BacklightInternal.getTimeoutDefault", k_timeout },
+    { "net.rim.device.internal.system.BacklightInternal.getStateFlags", k_zero },
+    { "net.rim.device.api.util.StringMatch.KMPMatch", sm_match },
+    { "net.rim.device.api.util.StringUtilities.stringToWordsOrKeywords", su_words },
     { "net.rim.device.internal.applicationcontrol.SystemPermissions.getConsumerDefaults", perm_all },
     { "net.rim.device.internal.applicationcontrol.SystemPermissions.getCorporateDefaults", perm_all },
     { "net.rim.device.internal.applicationcontrol.SystemPermissions.getDefaultPermissionsImpl", perm_all },

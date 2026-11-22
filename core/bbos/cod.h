@@ -73,7 +73,8 @@ typedef struct BBRoutine {
     int16_t nargs;      /* parameter slots */
     int8_t ret;         /* 0 void, 1 one slot, 2 two slots */
     int16_t vindex;     /* vtable index for virtual routines, else -1 */
-    void *native;       /* bound native implementation */
+    void *native;       /* bound native implementation (or hook) */
+    uint8_t hook;       /* Java routine replaced natively: 0 unchecked, 1 no, 2 yes */
     void *prep;         /* interpreter scratch */
 } BBRoutine;
 

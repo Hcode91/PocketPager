@@ -210,5 +210,6 @@ void vm_disasm_class(BBVM *vm, BBClass *k, FILE *out);
 /* natives */
 void natives_init(BBVM *vm);
 NativeFn natives_lookup(BBVM *vm, BBRoutine *r);
+NativeFn natives_hook(BBVM *vm, BBRoutine *r);   /* Java methods replaced natively */
 
 #endif

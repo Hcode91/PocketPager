@@ -308,11 +308,15 @@ NAT(cmm_getModuleHandleForObject) {
     ret[0] = o && o->kind == OK_INST ? (uint32_t)nat_module_handle(vm, o->cls->mod->name) : 0;
     return NAT_OK;
 }
-NAT(cmm_getModuleName) { /* (handle, index): index 0 is the module itself */
+NAT(cmm_getModuleName) { /* (handle, index): index 0 is the module itself, then its imports */
     UNUSED;
     NatState *s = nat_state(vm);
-    int h = (int)a[0];
-    ret[0] = (h >= 1 && h <= s->nmods && a[1] == 0) ? vm_new_string(vm, s->modNames[h - 1]) : 0;
+    int h = (int)a[0], i = (int)a[1];
+    ret[0] = 0;
+    if (h < 1 || h > s->nmods || i < 0) return NAT_OK;
+    if (i == 0) { ret[0] = vm_new_string(vm, s->modNames[h - 1]); return NAT_OK; }
+    BBModule *m = nat_module_by_handle(vm, h);
+    if (m && i < m->nmod) ret[0] = vm_new_string(vm, cod_cstr(m, m->modNameOff[i]));
     return NAT_OK;
 }
 NAT(cmm_getModuleAliasName) { /* (handle, index) -> alias or null */
@@ -327,7 +331,8 @@ NAT(cmm_getModuleAliasName) { /* (handle, index) -> alias or null */
 NAT(cmm_getModuleVersion) {
     UNUSED;
     BBModule *m = nat_module_by_handle(vm, (int)a[0]);
-    ret[0] = m && m->nmod ? vm_new_string(vm, cod_name(m, rd16(m->data + 52 + 2 * m->ncls + 2 * m->nmod))) : 0;
+    int i = (int)a[1];
+    ret[0] = m && m->nmod && i >= 0 && i < m->nmod ? vm_new_string(vm, cod_name(m, rd16(m->data + 52 + 2 * m->ncls + 2 * m->nmod + 2 * i))) : 0;
     if (m && !ret[0]) ret[0] = vm_new_string(vm, "5.0.0");
     return NAT_OK;
 }
@@ -388,7 +393,7 @@ NAT(is_catastrophicFailure) {
 
 /* ---------------- VM registries ---------------- */
 static ref_t g_appRegistry;
-NAT(proc_registerAppRegistry) { UNUSED; g_appRegistry = a[0]; Obj *o = vm_obj(vm, a[0]); if (o) o->flags |= OF_PERM; return NAT_OK; }
+NAT(proc_registerAppRegistry) { UNUSED; if (g_appRegistry && g_appRegistry != a[0]) vm_log(vm, "app registry replaced"); g_appRegistry = a[0]; Obj *o = vm_obj(vm, a[0]); if (o) o->flags |= OF_PERM; return NAT_OK; }
 NAT(proc_getAppRegistry) { UNUSED; ret[0] = g_appRegistry; return NAT_OK; }
 
 /* PersistentInteger: small persistent ints keyed by a long id */
@@ -406,10 +411,11 @@ NAT(pint_set) { UNUSED; int i = (int)a[0]; if (i >= 0 && i < g_npint) g_pint[i].
 
 
 /* ---------------- TraceBack: who is calling ---------------- */
-/* Frames from the caller of the native outwards (the native itself has no frame). */
+/* The native itself has no frame: the top frame is the method asking, and
+ * depth 0 is that method's caller. */
 NAT(tb_getCallingModules) {
     UNUSED;
-    int n = t->nfr;
+    int n = t->nfr > 0 ? t->nfr - 1 : 0;
     ref_t arr = vm_new_array(vm, BT_INT, NULL, 1, (uint32_t)n);
     Obj *o = vm_obj(vm, arr);
     for (int i = 0; i < n; i++) o->d[i] = (uint32_t)nat_module_handle(vm, t->fr[n - 1 - i].r->mod->name);
@@ -418,19 +424,19 @@ NAT(tb_getCallingModules) {
 }
 NAT(tb_getCallingModule) {
     UNUSED;
-    int d = (int)a[0], i = t->nfr - 1 - d;
+    int d = (int)a[0], i = t->nfr - 2 - d;
     ret[0] = i >= 0 ? (uint32_t)nat_module_handle(vm, t->fr[i].r->mod->name) : 0;
     return NAT_OK;
 }
 NAT(tb_getCallingModuleName) {
     UNUSED;
-    int d = (int)a[0], i = t->nfr - 1 - d;
+    int d = (int)a[0], i = t->nfr - 2 - d;
     ret[0] = i >= 0 ? vm_new_string(vm, t->fr[i].r->mod->name) : 0;
     return NAT_OK;
 }
 NAT(tb_getCallingClasses) {
     UNUSED;
-    int n = t->nfr;
+    int n = t->nfr > 0 ? t->nfr - 1 : 0;
     ref_t arr = vm_new_array(vm, BT_CLASS, vm->cClass, 1, (uint32_t)n);
     for (int i = 0; i < n; i++) {
         BBClass *k = t->fr[n - 1 - i].r->cls;

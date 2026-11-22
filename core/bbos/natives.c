@@ -53,10 +53,12 @@ NAT(obj_wait) {
     ref_t o = a[0];
     if (t->waitCount < 0) {           /* resumed: monitor reacquired by the scheduler */
         t->waitCount = 0;
+        if (t->interrupted == 1) { t->interrupted = 0; vm_throw(vm, t, "java.lang.InterruptedException", NULL); return NAT_THROWN; }
         return NAT_OK;
     }
     Monitor *m = vm_monitor(vm, o, 0);
     if (!m || m->owner != t) { vm_throw(vm, t, "java.lang.IllegalMonitorStateException", NULL); return NAT_THROWN; }
+    if (t->interrupted == 1) { t->interrupted = 0; vm_throw(vm, t, "java.lang.InterruptedException", NULL); return NAT_THROWN; }
     int64_t ms = arg64(a + 1);
     t->waitCount = m->count;
     m->count = 0; m->owner = NULL;
@@ -160,7 +162,12 @@ NAT(sys_identityHashCode) { UNUSED; Obj *o = vm_obj(vm, a[0]); ret[0] = o ? o->h
 /* ---------------- java.lang.Thread ---------------- */
 NAT(thr_sleep) {
     UNUSED;
-    if (t->waitCount < 0) { t->waitCount = 0; return NAT_OK; }
+    if (t->waitCount < 0) {
+        t->waitCount = 0;
+        if (t->interrupted == 1) { t->interrupted = 0; vm_throw(vm, t, "java.lang.InterruptedException", NULL); return NAT_THROWN; }
+        return NAT_OK;
+    }
+    if (t->interrupted == 1) { t->interrupted = 0; vm_throw(vm, t, "java.lang.InterruptedException", NULL); return NAT_THROWN; }
     int64_t ms = arg64(a);
     t->state = TS_SLEEP;
     t->wakeAt = now_ms(vm) + (uint64_t)(ms > 0 ? ms : 0);
@@ -672,6 +679,28 @@ NativeFn natives_lookup(BBVM *vm, BBRoutine *r) {
     if (g_logMissing) { vm_log(vm, "native missing: %s", full); if ((vm->trace & 128) && vm->cur) vm_backtrace(vm, vm->cur); }
     if (g_nunbound < 4096) { g_unbound[g_nunbound].r = r; snprintf(g_unbound[g_nunbound].name, 256, "%s", full); g_nunbound++; }
     return nat_missing;
+}
+
+/* Java methods the emulator replaces (high level hooks) */
+NAT(hook_nop) { UNUSED; return NAT_OK; }
+NAT(hook_ioerror) { UNUSED; vm_throw(vm, t, "java.io.IOException", "no radio"); return NAT_THROWN; }
+static const NatEnt kHooks[] = {
+    /* At the end of start-up the application manager wakes everyone still
+     * waiting for a singleton so they fail fast. Services here take longer
+     * to come up than on the device, so let them keep waiting instead. */
+    { "net.rim.device.api.system.ApplicationRegistry.kickAllWaitingThreads", hook_nop },
+    /* There is no radio: the IPPP transport's datagram link would recurse
+     * through the transport registry forever while opening itself. */
+    { "net.rim.device.cldc.io.ippp.IPPPTransportBase.init", hook_ioerror },
+    { NULL, NULL }
+};
+
+NativeFn natives_hook(BBVM *vm, BBRoutine *r) {
+    if (!r->cls || !r->name || !*r->name) return NULL;
+    char nm[512];
+    snprintf(nm, sizeof nm, "%s.%s", r->cls->full, r->name);
+    for (const NatEnt *e = kHooks; e->name; e++) if (!strcmp(e->name, nm)) { (void)vm; return e->fn; }
+    return NULL;
 }
 
 void natives_init(BBVM *vm) { (void)vm; }

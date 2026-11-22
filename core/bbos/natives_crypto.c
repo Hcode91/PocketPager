@@ -1,6 +1,7 @@
 /* PocketPager - BlackBerry OS family: message digests behind
  * net.rim.device.api.crypto.NativeDigest (SHA-1, SHA-256, MD5). */
 #include "natives.h"
+#include "blockcipher.h"
 
 enum { D_SHA1 = 1, D_SHA256, D_MD5 };
 
@@ -261,7 +262,96 @@ NAT(fips_xorBytes) {   /* (byte[] buf, off, len) */
 }
 NAT(fips_version) { UNUSED; ret[0] = 1; return NAT_OK; }
 
+/* ------------------------------------------------------------------ */
+/* CryptoBlockNatives: content protection blocks. Algorithm 1 is 3DES and
+ * 2 is AES, both CBC with a zero IV and zero padding to 16 bytes.
+ * "Compression" is a 4-byte length prefix so that decryptDecompress gives
+ * back the exact original length. */
+
+static ref_t cb_crypt(BBVM *vm, Obj *key, int alg, const uint8_t *in, uint32_t n, int dec) {
+    uint32_t bs = alg == 1 ? 8 : 16, out = dec ? n - n % bs : (n + 15) / 16 * 16;
+    ref_t r = vm_new_array(vm, BT_BYTE, NULL, 1, out);
+    uint8_t *o = (uint8_t *)vm_obj(vm, r)->d, iv[16] = { 0 }, blk[16], prev[16];
+    uint32_t kl = key ? key->len : 0;
+    const uint8_t *kb = key ? (const uint8_t *)key->d : iv;
+    AesKey ak; DesKey dk;
+    if (alg == 1) des_setkey(&dk, kb, kl >= 24 ? 24 : kl >= 16 ? 16 : 8);
+    else aes_setkey(&ak, kb, kl >= 32 ? 32 : kl >= 24 ? 24 : 16);
+    for (uint32_t p = 0; p < out; p += bs) {
+        memset(blk, 0, sizeof blk);
+        memcpy(blk, in + p, p + bs <= n ? bs : (p < n ? n - p : 0));
+        if (!dec) {
+            for (uint32_t i = 0; i < bs; i++) blk[i] ^= iv[i];
+            if (alg == 1) des_encrypt(&dk, blk, o + p); else aes_encrypt(&ak, blk, o + p);
+            memcpy(iv, o + p, bs);
+        } else {
+            memcpy(prev, blk, bs);
+            if (alg == 1) des_decrypt(&dk, blk, o + p); else aes_decrypt(&ak, blk, o + p);
+            for (uint32_t i = 0; i < bs; i++) o[p + i] ^= iv[i];
+            memcpy(iv, prev, bs);
+        }
+    }
+    return r;
+}
+static int cb_args(BBVM *vm, Thread *t, uint32_t *a, Obj **key, const uint8_t **p, uint32_t *n) {
+    Obj *d = vm_obj(vm, a[2]);
+    *key = vm_obj(vm, a[0]);
+    if (!d || a[3] > d->len || a[4] > d->len - a[3]) { vm_throw(vm, t, "java.lang.IllegalArgumentException", NULL); return 0; }
+    *p = (const uint8_t *)d->d + a[3]; *n = a[4];
+    return 1;
+}
+NAT(cb_encrypt) {   /* (key, alg, data, off, len, flags) */
+    UNUSED; Obj *k; const uint8_t *p; uint32_t n;
+    if (!cb_args(vm, t, a, &k, &p, &n)) return NAT_THROWN;
+    ret[0] = cb_crypt(vm, k, (int)(int8_t)a[1], p, n, 0);
+    return NAT_OK;
+}
+NAT(cb_decrypt) {
+    UNUSED; Obj *k; const uint8_t *p; uint32_t n;
+    if (!cb_args(vm, t, a, &k, &p, &n)) return NAT_THROWN;
+    ret[0] = cb_crypt(vm, k, (int)(int8_t)a[1], p, n, 1);
+    return NAT_OK;
+}
+NAT(cb_compressEncrypt) {
+    UNUSED; Obj *k; const uint8_t *p; uint32_t n;
+    if (!cb_args(vm, t, a, &k, &p, &n)) return NAT_THROWN;
+    uint8_t *tmp = malloc(n + 4);
+    tmp[0] = (uint8_t)(n >> 24); tmp[1] = (uint8_t)(n >> 16); tmp[2] = (uint8_t)(n >> 8); tmp[3] = (uint8_t)n;
+    memcpy(tmp + 4, p, n);
+    ret[0] = cb_crypt(vm, k, (int)(int8_t)a[1], tmp, n + 4, 0);
+    free(tmp);
+    return NAT_OK;
+}
+NAT(cb_decryptDecompress) {
+    UNUSED; Obj *k; const uint8_t *p; uint32_t n;
+    if (!cb_args(vm, t, a, &k, &p, &n)) return NAT_THROWN;
+    ref_t r = cb_crypt(vm, k, (int)(int8_t)a[1], p, n, 1);
+    Obj *o = vm_obj(vm, r);
+    const uint8_t *q = (const uint8_t *)o->d;
+    uint32_t len = o->len >= 4 ? (uint32_t)q[0] << 24 | q[1] << 16 | q[2] << 8 | q[3] : 0;
+    if (len > o->len - 4) len = o->len >= 4 ? o->len - 4 : 0;
+    ref_t out = vm_new_array(vm, BT_BYTE, NULL, 1, len);
+    memcpy(vm_obj(vm, out)->d, (const uint8_t *)vm_obj(vm, r)->d + 4, len);
+    ret[0] = out;
+    return NAT_OK;
+}
+NAT(cb_copy) {   /* compress/decompress (byte[], off, len): identity */
+    UNUSED;
+    Obj *d = vm_obj(vm, a[0]);
+    if (!d || a[1] > d->len || a[2] > d->len - a[1]) { vm_throw(vm, t, "java.lang.IllegalArgumentException", NULL); return NAT_THROWN; }
+    ref_t r = vm_new_array(vm, BT_BYTE, NULL, 1, a[2]);
+    memcpy(vm_obj(vm, r)->d, (uint8_t *)vm_obj(vm, a[0])->d + a[1], a[2]);
+    ret[0] = r;
+    return NAT_OK;
+}
+
 const NatEnt kNativesCrypto[] = {
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.encrypt", cb_encrypt },
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.decrypt", cb_decrypt },
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.compressEncrypt", cb_compressEncrypt },
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.decryptDecompress", cb_decryptDecompress },
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.compress", cb_copy },
+    { "net.rim.device.internal.crypto.CryptoBlockNatives.decompress", cb_copy },
     { "net.rim.device.api.crypto.NativeFIPSPRNG.initialize", fips_initialize },
     { "net.rim.device.api.crypto.NativeFIPSPRNG.xorBytes", fips_xorBytes },
     { "net.rim.device.api.crypto.NativeFIPSPRNG.getVersion", fips_version },
