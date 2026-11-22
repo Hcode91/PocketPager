@@ -287,7 +287,18 @@ NAT(su_words) {
 }
 
 
+/* no device password: only an empty password verifies */
+NAT(sec_verify) {
+    UNUSED;
+    Obj *p = vm_obj(vm, a[0]);
+    ret[0] = !p || p->len == 0;
+    return NAT_OK;
+}
+
 const NatEnt kNativesMisc[] = {
+    { "net.rim.device.internal.system.Security.verifyPasswordsInternal", sec_verify },
+    { "net.rim.device.internal.system.Security.lockOnIdleTimeout", k_zero },
+    { "net.rim.device.internal.system.Security.suppressSecurityFeature", k_zero },
     { "net.rim.device.api.math.Fixed32.div(II)", fixed32_div },
     { "net.rim.device.internal.system.InternalServices.getBootRomMetrics", bootrom_metrics },
     { "net.rim.device.internal.system.InternalServices.getOSAPIVersion", os_api_version },

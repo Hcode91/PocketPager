@@ -230,7 +230,7 @@ void bbg_fill(GCtx *c, int x, int y, int w, int h, uint32_t rgb, int a) { fill(c
 /* ------------------------------------------------------------------ */
 /* context stack (kept natively per Graphics object)                   */
 
-typedef struct GState { int cx, cy, cw, ch, tx, ty; } GState;
+typedef struct GState { int cx, cy, cw, ch, tx, ty; uint32_t color, alpha, bg, style, font; } GState;
 typedef struct GStack { int n, cap; GState *s; } GStack;
 
 static void gstack_free(void *p) { GStack *s = p; if (s) { free(s->s); free(s); } }
@@ -250,6 +250,8 @@ static int push_ctx(BBVM *vm, ref_t gr, int x, int y, int w, int h, int dx, int 
     GState *p = &st->s[st->n++];
     p->cx = (int)g->d[G_CLIPX]; p->cy = (int)g->d[G_CLIPY]; p->cw = (int)g->d[G_CLIPW]; p->ch = (int)g->d[G_CLIPH];
     p->tx = (int)g->d[G_TX]; p->ty = (int)g->d[G_TY];
+    /* the context also keeps the colours, drawing style and font */
+    p->color = g->d[G_COLOR]; p->alpha = g->d[G_ALPHA]; p->bg = g->d[G_BG]; p->style = g->d[G_STYLE]; p->font = g->d[G_FONT];
     int ax = x + p->tx, ay = y + p->ty;
     int x0 = ax > p->cx ? ax : p->cx, y0 = ay > p->cy ? ay : p->cy;
     int x1 = ax + w < p->cx + p->cw ? ax + w : p->cx + p->cw;
@@ -272,6 +274,7 @@ static void pop_ctx(BBVM *vm, ref_t gr) {
     GState *p = &st->s[--st->n];
     g->d[G_CLIPX] = (uint32_t)p->cx; g->d[G_CLIPY] = (uint32_t)p->cy; g->d[G_CLIPW] = (uint32_t)p->cw; g->d[G_CLIPH] = (uint32_t)p->ch;
     g->d[G_TX] = (uint32_t)p->tx; g->d[G_TY] = (uint32_t)p->ty;
+    g->d[G_COLOR] = p->color; g->d[G_ALPHA] = p->alpha; g->d[G_BG] = p->bg; g->d[G_STYLE] = p->style; g->d[G_FONT] = p->font;
     g->d[12] = (uint32_t)st->n;
 }
 
@@ -294,6 +297,26 @@ typedef struct BackBuf { int pid; ref_t bmp; } BackBuf;
 static BackBuf g_bb[256]; static int g_nbb;
 static int g_visiblePid = -1;
 
+/* hardware overlays: bitmaps the display controller draws over the LCD */
+typedef struct Overlay { int used, id, x, y, visible; ref_t bmp; } Overlay;
+static Overlay g_ov[16];
+static void draw_overlays(BBVM *vm) {
+    for (int i = 0; i < 16; i++) if (g_ov[i].used && g_ov[i].visible) {
+        Surf s, al;
+        Obj *bo = vm_obj(vm, g_ov[i].bmp);
+        if (!bo || !surf_bitmap(vm, g_ov[i].bmp, &s)) continue;
+        int hasA = surf_bitmap(vm, bo->d[B_ALPHA], &al);
+        for (int y = 0; y < s.h; y++) for (int x = 0; x < s.w; x++) {
+            int dx = g_ov[i].x + x, dy = g_ov[i].y + y;
+            if (dx < 0 || dy < 0 || dx >= BB_SCREEN_W || dy >= BB_SCREEN_H) continue;
+            uint32_t v = surf_get(&s, x, y);
+            int a8 = hasA ? (int)surf_get(&al, x, y) : 255;
+            uint16_t *p = &g_fb[dy * BB_SCREEN_W + dx];
+            *p = rgb_to_565(blend(rgb565_to_rgb(*p), v, a8));
+        }
+    }
+}
+
 static void present(BBVM *vm) {
     if (getenv("BBGFXLOG")) { for (int i = 0; i < g_nbb; i++) vm_log(vm, "present: pid %d bmp %x%s", g_bb[i].pid, g_bb[i].bmp, g_bb[i].pid == g_visiblePid ? " (visible)" : ""); }
     for (int i = 0; i < g_nbb; i++) if (g_bb[i].pid == g_visiblePid) {
@@ -304,6 +327,7 @@ static void present(BBVM *vm) {
             uint8_t *r = surf_row(&s, y);
             if (r) memcpy(g_fb + (size_t)y * BB_SCREEN_W, r, (size_t)w * 2);
         }
+        draw_overlays(vm);
         g_frame++;
         return;
     }
@@ -335,6 +359,32 @@ NAT(g_getDirtyRegion) {   /* (XYRect): the engine finished painting */
     if (t->procId == g_visiblePid) present(vm);
     return NAT_OK;
 }
+NAT(g_updateFromBackBuffer) {   /* (x, y, w, h, ?, ?) on the backbuffer's Graphics */
+    UNUSED;
+    Obj *g = vm_obj(vm, a[0]);
+    if (g && g->len > G_BITMAP && g->d[G_BITMAP]) note_screen_bitmap(vm, t->procId, g->d[G_BITMAP]);
+    if (t->procId == g_visiblePid) present(vm);
+    return NAT_OK;
+}
+static Overlay *ov_find(int id, int create) {
+    for (int i = 0; i < 16; i++) if (g_ov[i].used && g_ov[i].id == id) return &g_ov[i];
+    if (create) for (int i = 0; i < 16; i++) if (!g_ov[i].used) { memset(&g_ov[i], 0, sizeof g_ov[i]); g_ov[i].used = 1; g_ov[i].id = id; return &g_ov[i]; }
+    return NULL;
+}
+NAT(ov_set) {   /* static (display, id, Bitmap, x, y, visible) */
+    UNUSED;
+    Overlay *o = ov_find((int)a[1], 1);
+    if (o) { o->bmp = a[2]; o->x = (int)a[3]; o->y = (int)a[4]; o->visible = (int)a[5]; Obj *b = vm_obj(vm, a[2]); if (b) b->flags |= OF_PERM; }
+    return NAT_OK;
+}
+NAT(ov_delete) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->used = 0; return NAT_OK; }
+NAT(ov_isSet) { UNUSED; ret[0] = ov_find((int)a[1], 0) != NULL; return NAT_OK; }
+NAT(ov_handle) { UNUSED; ret[0] = a[1]; return NAT_OK; }
+NAT(ov_position) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) { o->x = (int)a[2]; o->y = (int)a[3]; } ret[0] = o != NULL; return NAT_OK; }
+NAT(ov_state) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->visible = (int)a[2]; ret[0] = o != NULL; return NAT_OK; }
+NAT(ov_update) { UNUSED; Overlay *o = ov_find((int)a[1], 0); if (o) o->bmp = a[2]; ret[0] = o != NULL; return NAT_OK; }
+NAT(ov_disable) { UNUSED; for (int i = 0; i < 16; i++) g_ov[i].visible = 0; return NAT_OK; }
+
 NAT(g_setVisibleProcess) { UNUSED; g_visiblePid = (int)a[1]; if (getenv("BBGFXLOG")) vm_log(vm, "visible pid %d (%d) caller pid %d, %d backbuffers", (int)a[0], (int)a[1], t->procId, g_nbb); present(vm); return NAT_OK; }
 NAT(g_resetStack) {
     UNUSED;
@@ -714,6 +764,7 @@ NAT(ei_getBMPImage) { UNUSED; return ei_decode(vm, a[0], a[1], 0); }
 /* ------------------------------------------------------------------ */
 
 NAT(k_true) { UNUSED; ret[0] = 1; return NAT_OK; }
+NAT(g_nop) { UNUSED; return NAT_OK; }
 NAT(k_false) { UNUSED; ret[0] = 0; return NAT_OK; }
 NAT(disp_props) { UNUSED; ret[0] = 0; return NAT_OK; }
 
@@ -721,6 +772,16 @@ const NatEnt kNativesGfx[] = {
     { "net.rim.device.api.ui.Graphics.createFrontbufferSurface", g_createFrontbuffer },
     { "net.rim.device.api.ui.Graphics.createBackbufferSurface", g_createBackbuffer },
     { "net.rim.device.api.ui.GraphicsInternal.getDirtyRegion0", g_getDirtyRegion },
+    { "net.rim.device.api.ui.GraphicsInternal.updateDisplayFromBackBuffer0", g_updateFromBackBuffer },
+    { "net.rim.device.api.ui.GraphicsInternal.resetDirtyRegion0", g_nop },
+    { "net.rim.device.api.ui.GraphicsInternal.setOverlay0Impl", ov_set },
+    { "net.rim.device.api.ui.GraphicsInternal.deleteOverlay0Impl", ov_delete },
+    { "net.rim.device.api.ui.GraphicsInternal.isOverlaySet0Impl", ov_isSet },
+    { "net.rim.device.api.ui.GraphicsInternal.getOverlayHandle0Impl", ov_handle },
+    { "net.rim.device.api.ui.GraphicsInternal.setOverlayPosition0Impl", ov_position },
+    { "net.rim.device.api.ui.GraphicsInternal.setOverlayState0Impl", ov_state },
+    { "net.rim.device.api.ui.GraphicsInternal.updateOverlay0Impl", ov_update },
+    { "net.rim.device.api.ui.GraphicsInternal.disableOverlays0", ov_disable },
     { "net.rim.device.internal.system.InternalServices.setVisibleProcessImpl", g_setVisibleProcess },
     { "net.rim.device.api.ui.Graphics.resetStack", g_resetStack },
     { "net.rim.device.api.ui.Graphics.pushContext(IIIIII)", g_pushContext6 },

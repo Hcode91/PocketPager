@@ -262,16 +262,13 @@ static int eldest_handle(BBVM *vm, int h) {
 }
 NAT(proc_getEldestSibling) { UNUSED; ret[0] = (uint32_t)eldest_handle(vm, (int)a[0]); return NAT_OK; }
 NAT(proc_getModuleHandleCS) { UNUSED; ret[0] = a[0]; return NAT_OK; }
-NAT(proc_getCodeSectionNumber2) {   /* (handle, sibling index) */
+NAT(proc_getCodeSectionNumber2) {   /* (handle, index): 0 is the module itself, then its imports */
     UNUSED;
-    NatState *s = nat_state(vm);
-    int e = eldest_handle(vm, (int)a[0]);
-    ret[0] = (uint32_t)e;
-    if (e && (int)a[1] > 0) {
-        char nm[300];
-        snprintf(nm, sizeof nm, "%s-%d", s->modNames[e - 1], (int)a[1]);
-        ret[0] = (uint32_t)nat_module_handle(vm, nm);
-    }
+    int h = (int)a[0], i = (int)a[1];
+    ret[0] = 0;
+    if (i == 0) { ret[0] = (uint32_t)h; return NAT_OK; }
+    BBModule *m = nat_module_by_handle(vm, h);
+    if (m && i > 0 && i < m->nmod) ret[0] = (uint32_t)nat_module_handle(vm, cod_cstr(m, m->modNameOff[i]));
     return NAT_OK;
 }
 NAT(proc_classForName) { /* classForName(String, int handle) */

@@ -192,7 +192,9 @@ static int draw_glyphs(GCtx *c, FontSel *s, const Text *tx, int32_t off, int32_t
     int pen = 0;
     int a8 = c->alpha;
     for (int32_t i = 0; i < len; i++) {
-        Glyph *g = glyph(s, text_at(tx, (uint32_t)(off + i)));
+        uint32_t ch = text_at(tx, (uint32_t)(off + i));
+        if (ch < 32) continue;
+        Glyph *g = glyph(s, ch);
         if (!g) continue;
         if (maxw >= 0 && pen + g->adv > maxw) break;
         if (g->bmp) {
@@ -295,8 +297,28 @@ static int draw_text_param(BBVM *vm, Thread *t, ref_t gr, ref_t xr, int32_t off,
     ret[0] = 0;
     if (!text_of(vm, xr, &tx) || !bbg_ctx(vm, gr, &c) || !font_sel(vm, t, c.g->d[G_FONT], &s)) return NAT_OK;
     text_range(&tx, &off, &len);
+    {
+        Obj *p = vm_obj(vm, dtp);
+        if (p && p->len > 7) {
+            int so = (int32_t)p->d[5], eo = (int32_t)p->d[6];
+            if (so > 0 && so <= len) { off += so; len -= so; eo -= so; }
+            if (eo >= 0 && eo < len) len = eo;
+        }
+    }
     int adv, n = fit(vm, &s, &tx, off, len, dtp, &adv);
-    draw_glyphs(&c, &s, &tx, off, n, x + c.tx, y + c.ty + s.asc, -1);
+    if (getenv("BBGFXLOG")) {
+        Obj *p = vm_obj(vm, dtp);
+        char buf[64]; int k = 0;
+        for (int32_t i = 0; i < n && k < 60; i++) { unsigned ch = text_at(&tx, (uint32_t)(off + i)); buf[k++] = ch < 127 && ch >= 32 ? (char)ch : '?'; if (ch >= 127 || ch < 32) k += snprintf(buf + k, sizeof buf - k > 0 ? sizeof buf - k : 0, "%x", ch); if (k > 60) k = 60; }
+        buf[k] = 0;
+        vm_log(vm, "drawTextP [p%d bmp %x col %06x a %d] .%s. at %d,%d align %d so %d eo %d clip %d,%d-%d,%d t %d,%d asc %d", t->procId, c.g->d[G_BITMAP], c.color, c.alpha, buf, x, y, p && p->len > 7 ? (int)p->d[7] : -9, p && p->len > 7 ? (int)p->d[5] : -9, p && p->len > 7 ? (int)p->d[6] : -9, c.cx0, c.cy0, c.cx1, c.cy1, c.tx, c.ty, s.asc);
+    }
+    {
+        Obj *p = vm_obj(vm, dtp);
+        int al = p && p->len > 7 ? (int)p->d[7] : 0;
+        /* DrawTextParam alignment 8 puts y on the baseline; otherwise y is the top */
+        draw_glyphs(&c, &s, &tx, off, n, x + c.tx, y + c.ty + (al == 8 ? 0 : s.asc), -1);
+    }
     tm_fill(vm, tmr, adv, n, &s);
     ret[0] = (uint32_t)adv;
     return NAT_OK;
@@ -402,7 +424,145 @@ NAT(fm_loadFontResource) {   /* (byte[][][] table, index, name, system, ?, ?) ->
 NAT(fm_noop) { UNUSED; return NAT_OK; }
 NAT(fm_unload) { UNUSED; ret[0] = 1; return NAT_OK; }
 
+/* ------------------------------------------------------------------ */
+/* ArticInterface: the device's native text layout engine.
+ *
+ * Format() fills the shared Layout with lines (11 ints each: text length,
+ * skipped characters, run count, origin x, origin y, bounds l/t/r/b, bidi
+ * bytes, flags) and runs (10 ints: start in line, length, format index,
+ * extended attributes, advance, x/y offset, ascent, descent, flags); the
+ * Java side turns them into Line objects. This version always lays out
+ * the whole text again from the first line, wrapping at spaces. */
+
+enum { L_TOTAL = 0, L_BL = 1, L_BT = 2, L_BR = 3, L_BB = 4, L_OBL = 5, L_OBT = 6, L_OBR = 7, L_OBB = 8,
+       L_TEXTSTART = 13, L_OLDLINES = 14, L_UNFSTART = 15, L_UNFLEN = 16, L_LINEDATA = 17, L_RUNDATA = 18,
+       L_BIDI = 19, L_FLOAT = 20, L_FBIDI = 21, L_FFLOAT = 22 };
+
+static int count_lines(BBVM *vm, ref_t line) {
+    Obj *l = vm_obj(vm, line);
+    if (!l) return 0;
+    for (int g = 0; g < 100000 && vm_obj(vm, l->d[0]); g++) l = vm_obj(vm, l->d[0]);   /* to the first */
+    int n = 0;
+    for (; l && n < 100000; n++) l = vm_obj(vm, l->d[1]);
+    return n;
+}
+
+NAT(artic_format) {
+    UNUSED;
+    /* (Layout, Font, width?, textStart, oldLength, newLength, ?, Z, ?, AttributedString, Line, ...) */
+    Obj *lay = vm_obj(vm, a[0]);
+    Obj *as = vm_obj(vm, a[9]);
+    if (!lay || lay->len < 23 || !as) return NAT_OK;
+    FontSel s;
+    if (!font_sel(vm, t, a[1], &s)) return NAT_OK;
+    int width = (int32_t)a[2];
+    if (width <= 0 || width > 100000) width = 0x7fffffff;
+    Text tx;
+    if (!text_of(vm, as->d[3], &tx)) { memset(&tx, 0, sizeof tx); }
+    uint32_t total = as->len > 4 ? as->d[4] : tx.size;
+    if (total > tx.size) total = tx.size;
+    if (getenv("BBGFXLOG")) vm_log(vm, "Format w=%d start=%d old=%d new=%d a5=%d a6=%d a7=%d len=%u", (int)a[2], (int)a[3], (int)a[4], (int)a[5], (int)a[6], (int)a[7], (int)a[8], total);
+
+    /* break into lines */
+    int cap = 16, n = 0;
+    int *ls = malloc(sizeof(int) * 3 * (size_t)cap);   /* start, visible length, skipped */
+    uint32_t pos = 0;
+    do {
+        uint32_t i = pos, lastBreak = 0; int w = 0, haveBreak = 0;
+        while (i < total) {
+            uint32_t c = text_at(&tx, i);
+            if (c == '\n' || c == '\r' || c == 0x2029) break;
+            Glyph *g = glyph(&s, c);
+            int adv = g ? g->adv : 0;
+            if (w + adv > width && i > pos) break;
+            w += adv;
+            if (c == ' ') { lastBreak = i; haveBreak = 1; }
+            i++;
+        }
+        uint32_t end = i, next = i;
+        if (i < total) {
+            uint32_t c = text_at(&tx, i);
+            if (c == '\n' || c == '\r' || c == 0x2029) {
+                next = i + 1;
+                if (c == '\r' && next < total && text_at(&tx, next) == '\n') next++;
+            } else if (haveBreak) { end = lastBreak; next = lastBreak + 1; }
+            else next = end;
+        }
+        if (n == cap) { cap *= 2; ls = realloc(ls, sizeof(int) * 3 * (size_t)cap); }
+        ls[3 * n] = (int)pos; ls[3 * n + 1] = (int)(end - pos); ls[3 * n + 2] = (int)(next - end);
+        n++;
+        pos = next;
+    } while (pos < total);
+    /* trailing newline starts an empty last line */
+    if (total && n && ls[3 * (n - 1)] + ls[3 * (n - 1) + 1] + ls[3 * (n - 1) + 2] == (int)total) {
+        uint32_t c = text_at(&tx, total - 1);
+        if (c == '\n' || c == '\r' || c == 0x2029) {
+            if (n == cap) { cap *= 2; ls = realloc(ls, sizeof(int) * 3 * (size_t)cap); }
+            ls[3 * n] = (int)total; ls[3 * n + 1] = 0; ls[3 * n + 2] = 0; n++;
+        }
+    }
+
+    int oldLines = count_lines(vm, a[10]);
+    ref_t ld = vm_new_array(vm, BT_INT, NULL, 1, (uint32_t)(11 * n));
+    int nruns = 0;
+    for (int k = 0; k < n; k++) if (ls[3 * k + 1] > 0) nruns++;
+    ref_t rd = vm_new_array(vm, BT_INT, NULL, 1, (uint32_t)(10 * nruns));
+    Obj *L = vm_obj(vm, ld), *R = vm_obj(vm, rd);
+    int lineH = s.asc + s.desc, maxW = 0, ri = 0;
+    for (int k = 0; k < n; k++) {
+        int st = ls[3 * k], vl = ls[3 * k + 1];
+        int w = text_advance(&s, &tx, st, vl);
+        if (w > maxW) maxW = w;
+        uint32_t *d = L->d + 11 * k;
+        d[0] = (uint32_t)vl; d[1] = (uint32_t)ls[3 * k + 2]; d[2] = vl > 0 ? 1 : 0;
+        d[3] = 0; d[4] = (uint32_t)s.asc;
+        d[5] = 0; d[6] = (uint32_t)-s.asc; d[7] = (uint32_t)w; d[8] = (uint32_t)s.desc;
+        d[9] = 0;
+        /* flag 1: the line starts a paragraph (the first line, or after a line break) */
+        int para = k == 0;
+        if (k > 0) { int pe = ls[3 * (k - 1)] + ls[3 * (k - 1) + 1]; if (ls[3 * (k - 1) + 2] > 0 && pe < (int)total) { uint32_t c = text_at(&tx, (uint32_t)pe); para = c == '\n' || c == '\r' || c == 0x2029; } }
+        d[10] = para ? 1 : 0;
+        if (vl > 0) {
+            uint32_t *r = R->d + 10 * ri++;
+            r[0] = 0; r[1] = (uint32_t)vl; r[2] = 0; r[3] = 0; r[4] = (uint32_t)w;
+            r[5] = 0; r[6] = 0; r[7] = (uint32_t)s.asc; r[8] = (uint32_t)s.desc; r[9] = 0;
+        }
+    }
+    free(ls);
+    lay = vm_obj(vm, a[0]);
+    int bw = width == 0x7fffffff ? maxW : width, bh = lineH * n;
+    lay->d[L_TOTAL] = total;
+    lay->d[L_BL] = 0; lay->d[L_BT] = 0; lay->d[L_BR] = (uint32_t)bw; lay->d[L_BB] = (uint32_t)bh;
+    lay->d[L_OBL] = 0; lay->d[L_OBT] = 0; lay->d[L_OBR] = (uint32_t)bw; lay->d[L_OBB] = (uint32_t)bh;
+    lay->d[L_TEXTSTART] = 0; lay->d[L_OLDLINES] = (uint32_t)oldLines;
+    lay->d[L_UNFSTART] = total; lay->d[L_UNFLEN] = 0;
+    lay->d[L_LINEDATA] = ld; lay->d[L_RUNDATA] = rd;
+    for (int k = L_BIDI; k <= L_FFLOAT; k++) if (!vm_obj(vm, lay->d[k])) lay->d[k] = vm_new_array(vm, BT_BYTE, NULL, 1, 16);
+    return NAT_OK;
+}
+
+/* GetLabelMetrics(String[] labels, Font[] fonts, LabelMetrics out) */
+NAT(artic_labelMetrics) {
+    UNUSED;
+    Obj *fonts = vm_obj(vm, a[1]), *out = vm_obj(vm, a[2]);
+    if (!out || out->len < 2) return NAT_OK;
+    int asc = 0, desc = 0;
+    for (uint32_t i = 0; fonts && i < fonts->len; i++) {
+        FontSel s;
+        if (font_sel(vm, t, fonts->d[i], &s)) { if (s.asc > asc) asc = s.asc; if (s.desc > desc) desc = s.desc; }
+    }
+    out->d[0] = (uint32_t)asc; out->d[1] = (uint32_t)desc;
+    return NAT_OK;
+}
+NAT(artic_false) { UNUSED; ret[0] = 0; return NAT_OK; }
+NAT(artic_nop) { UNUSED; return NAT_OK; }
+
 const NatEnt kNativesFont[] = {
+    { "net.rim.device.internal.ui.ArticInterface.Format", artic_format },
+    { "net.rim.device.internal.ui.ArticInterface.GetLabelMetrics", artic_labelMetrics },
+    { "net.rim.device.internal.ui.ArticInterface.DocPosToCaret", artic_false },
+    { "net.rim.device.internal.ui.ArticInterface.PointToDocPos", artic_nop },
+    { "net.rim.device.internal.ui.ArticInterface.DocPosMove", artic_nop },
     { "net.rim.device.api.ui.FontManagerImpl.loadFontResource", fm_loadFontResource },
     { "net.rim.device.api.ui.FontManagerImpl.unloadFontResource", fm_unload },
     { "net.rim.device.api.ui.FontManagerImpl.submit", fm_noop },

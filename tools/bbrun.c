@@ -57,9 +57,12 @@ int main(int argc, char **argv) {
                 BBFixup *f = &m->fix[fi];
                 if (f->kind != FX_ROUTINE && f->kind != FX_SROUTINE && f->kind != FX_VROUTINE) continue;
                 BBMemberRef *mr = &m->mrefs[f->idx];
-                if (mr->cref < 0) continue;
                 char full[512];
-                snprintf(full, sizeof full, "%s.%s.%s", m->crefs[mr->cref].pkg, m->crefs[mr->cref].cls, mr->name);
+                if (mr->cref < 0) {
+                    BBClass *lc = mr->lcls < m->ncls ? &m->cls[mr->lcls] : NULL;
+                    snprintf(full, sizeof full, "%s.%s", lc ? lc->full : "?", mr->name);
+                } else snprintf(full, sizeof full, "%s.%s.%s", m->crefs[mr->cref].pkg, m->crefs[mr->cref].cls, mr->name);
+                if (getenv("XREFDBG") && strstr(full, getenv("XREFDBG"))) printf("dbg %s: %s\n", m->name, full);
                 if (strcmp(full, want)) continue;
                 BBRoutine *best = NULL;
                 for (int ri = 0; ri < m->nroutines; ri++) if (m->routines[ri].off <= f->off) best = &m->routines[ri];
@@ -81,6 +84,16 @@ int main(int argc, char **argv) {
                 vm_sig(vm, m, r->type, 0, rs, sizeof rs);
                 printf("%s%s.%s(%s)%s\n", r->isStatic ? "static " : "", r->cls ? r->cls->full : "?", r->name, sig, *rs ? rs : "V");
             }
+        }
+        return 0;
+    }
+    if (!strcmp(cls, "-classes")) {
+        for (int j = 0; j < 64; j++) {
+            char nm[128];
+            if (j) snprintf(nm, sizeof nm, "%s-%d", fam, j); else snprintf(nm, sizeof nm, "%s", fam);
+            BBModule *m = vm_module(vm, nm);
+            if (!m) { if (j) break; continue; }
+            for (int c = 0; c < m->ncls; c++) printf("%s %s\n", nm, m->cls[c].name);
         }
         return 0;
     }
@@ -115,7 +128,8 @@ int main(int argc, char **argv) {
             static int launched;
             const char *lm = getenv("BBLAUNCH");
             long long at = getenv("BBLAUNCHAT") ? atoll(getenv("BBLAUNCHAT")) : 120000000;
-            if (lm && !launched && vm->icount >= at) {
+            if (lm && !launched && (vm->icount >= at || idleIters > 50)) {
+                idleIters = 0;
                 launched = 1;
                 BBClass *am = vm_find_class_anywhere(vm, "net.rim.device.api.system.ApplicationManager");
                 BBRoutine *get = am ? vm_find_method(vm, am, "getApplicationManager", "") : NULL;
@@ -129,6 +143,26 @@ int main(int argc, char **argv) {
                     int rc2 = launch ? vm_call(vm, lt, launch, args, 2, NULL) : -9;
                     fprintf(stderr, "launch %s -> %d\n", lm, rc2);
                 } else fprintf(stderr, "launch %s: no application manager\n", lm);
+            }
+            /* then bring it to the front, as the home screen would */
+            static int fronted;
+            if (lm && launched && !fronted && idleIters > 50) {
+                idleIters = 0;
+                fronted = 1;
+                int pid = -1;
+                for (Thread *x = vm->threads; x; x = x->next)
+                    if (x->state != TS_DEAD && x->nfr && !strcmp(x->fr[0].r->mod->name, lm)) { pid = x->procId; break; }
+                BBClass *am = vm_find_class_anywhere(vm, "net.rim.device.api.system.ApplicationManager");
+                BBRoutine *get = am ? vm_find_method(vm, am, "getApplicationManager", "") : NULL;
+                Thread *lt = vm_new_thread(vm, 0);
+                lt->procId = 1;
+                uint32_t r[2] = { 0, 0 };
+                if (pid >= 0 && get && vm_call(vm, lt, get, NULL, 0, r) >= 0 && r[0]) {
+                    BBRoutine *rf = vm_find_method(vm, vm_obj(vm, r[0])->cls, "requestForeground", "I");
+                    uint32_t args[2] = { r[0], (uint32_t)pid };
+                    int rc2 = rf ? vm_call(vm, lt, rf, args, 2, NULL) : -9;
+                    fprintf(stderr, "foreground pid %d -> %d\n", pid, rc2);
+                } else fprintf(stderr, "foreground: %s not running\n", lm);
             }
         }
         {
