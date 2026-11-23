@@ -210,6 +210,58 @@ NAT(nv_writeData) {   /* (id, byte[], off, len) */
 NAT(nv_delete) { UNUSED; NvEnt *e = nv_find((int)a[0], 0); if (e) { free(e->data); *e = g_nv[--g_nnv]; } ret[0] = 1; return NAT_OK; }
 
 /* ---------------- assorted values the OS expects ---------------- */
+
+/* ---- Fixed32: 16.16 fixed point; angles in degrees (lower case) or
+ * radians (capitalised), all as 16.16 ---- */
+#include <math.h>
+#define FX(v) ((int32_t)(v))
+static double fx2d(uint32_t v) { return (double)(int32_t)v / 65536.0; }
+static uint32_t d2fx(double d) {
+    double r = floor(d * 65536.0 + 0.5);
+    if (r > 2147483647.0) r = 2147483647.0;
+    if (r < -2147483648.0) r = -2147483648.0;
+    return (uint32_t)(int32_t)r;
+}
+NAT(fx_mul) { UNUSED; ret[0] = (uint32_t)(int32_t)(((int64_t)FX(a[0]) * FX(a[1])) >> 16); return NAT_OK; }
+NAT(fx_sqrt) { UNUSED; double d = fx2d(a[0]); ret[0] = d <= 0 ? 0 : d2fx(sqrt(d)); return NAT_OK; }
+NAT(fx_sind) { UNUSED; ret[0] = d2fx(sin(fx2d(a[0]) * M_PI / 180)); return NAT_OK; }
+NAT(fx_cosd) { UNUSED; ret[0] = d2fx(cos(fx2d(a[0]) * M_PI / 180)); return NAT_OK; }
+NAT(fx_tand) { UNUSED; ret[0] = d2fx(tan(fx2d(a[0]) * M_PI / 180)); return NAT_OK; }
+NAT(fx_atand2) { UNUSED; ret[0] = d2fx(atan2(fx2d(a[0]), fx2d(a[1])) * 180 / M_PI); return NAT_OK; }
+NAT(fx_sin) { UNUSED; ret[0] = d2fx(sin(fx2d(a[0]))); return NAT_OK; }
+NAT(fx_cos) { UNUSED; ret[0] = d2fx(cos(fx2d(a[0]))); return NAT_OK; }
+NAT(fx_tan) { UNUSED; ret[0] = d2fx(tan(fx2d(a[0]))); return NAT_OK; }
+NAT(fx_atan) { UNUSED; ret[0] = d2fx(atan(fx2d(a[0]))); return NAT_OK; }
+NAT(fx_acos) { UNUSED; double d = fx2d(a[0]); if (d > 1) d = 1; if (d < -1) d = -1; ret[0] = d2fx(acos(d)); return NAT_OK; }
+NAT(fx_radToDeg) { UNUSED; ret[0] = d2fx(fx2d(a[0]) * 180 / M_PI); return NAT_OK; }
+NAT(fx_degToRad) { UNUSED; ret[0] = d2fx(fx2d(a[0]) * M_PI / 180); return NAT_OK; }
+NAT(fx_floor) { UNUSED; ret[0] = (uint32_t)(FX(a[0]) & ~0xffff); return NAT_OK; }
+NAT(fx_round) { UNUSED; ret[0] = (uint32_t)((FX(a[0]) + 0x8000) & ~0xffff); return NAT_OK; }
+
+/* VecMath.intersects(x1,y1,x2,y2, x3,y3,x4,y4): do the segments meet? */
+static int64_t orient(int64_t ax, int64_t ay, int64_t bx, int64_t by, int64_t cx, int64_t cy) {
+    int64_t v = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    return v > 0 ? 1 : v < 0 ? -1 : 0;
+}
+static int on_seg(int64_t ax, int64_t ay, int64_t bx, int64_t by, int64_t px, int64_t py) {
+    return px >= (ax < bx ? ax : bx) && px <= (ax > bx ? ax : bx) && py >= (ay < by ? ay : by) && py <= (ay > by ? ay : by);
+}
+NAT(vm_intersects) {
+    UNUSED;
+    int64_t p[8];
+    for (int i = 0; i < 8; i++) p[i] = (int32_t)a[i];
+    int64_t o1 = orient(p[0], p[1], p[2], p[3], p[4], p[5]), o2 = orient(p[0], p[1], p[2], p[3], p[6], p[7]);
+    int64_t o3 = orient(p[4], p[5], p[6], p[7], p[0], p[1]), o4 = orient(p[4], p[5], p[6], p[7], p[2], p[3]);
+    int r = 0;
+    if (o1 != o2 && o3 != o4) r = 1;
+    else if (!o1 && on_seg(p[0], p[1], p[2], p[3], p[4], p[5])) r = 1;
+    else if (!o2 && on_seg(p[0], p[1], p[2], p[3], p[6], p[7])) r = 1;
+    else if (!o3 && on_seg(p[4], p[5], p[6], p[7], p[0], p[1])) r = 1;
+    else if (!o4 && on_seg(p[4], p[5], p[6], p[7], p[2], p[3])) r = 1;
+    ret[0] = (uint32_t)r;
+    return NAT_OK;
+}
+
 NAT(fixed32_div) {   /* 16.16 fixed point a / b */
     UNUSED;
     int32_t x = (int32_t)a[0], y = (int32_t)a[1];
@@ -300,6 +352,22 @@ const NatEnt kNativesMisc[] = {
     { "net.rim.device.internal.system.Security.lockOnIdleTimeout", k_zero },
     { "net.rim.device.internal.system.Security.suppressSecurityFeature", k_zero },
     { "net.rim.device.api.math.Fixed32.div(II)", fixed32_div },
+    { "net.rim.device.api.math.Fixed32.mul", fx_mul },
+    { "net.rim.device.api.math.Fixed32.sqrt", fx_sqrt },
+    { "net.rim.device.api.math.Fixed32.sind", fx_sind },
+    { "net.rim.device.api.math.Fixed32.cosd", fx_cosd },
+    { "net.rim.device.api.math.Fixed32.tand", fx_tand },
+    { "net.rim.device.api.math.Fixed32.atand2", fx_atand2 },
+    { "net.rim.device.api.math.Fixed32.Sin", fx_sin },
+    { "net.rim.device.api.math.Fixed32.Cos", fx_cos },
+    { "net.rim.device.api.math.Fixed32.Tan", fx_tan },
+    { "net.rim.device.api.math.Fixed32.ArcTan", fx_atan },
+    { "net.rim.device.api.math.Fixed32.ArcCos", fx_acos },
+    { "net.rim.device.api.math.Fixed32.radToDeg", fx_radToDeg },
+    { "net.rim.device.api.math.Fixed32.degToRad", fx_degToRad },
+    { "net.rim.device.api.math.Fixed32.floor", fx_floor },
+    { "net.rim.device.api.math.Fixed32.round", fx_round },
+    { "net.rim.device.api.math.VecMath.intersects", vm_intersects },
     { "net.rim.device.internal.system.InternalServices.getBootRomMetrics", bootrom_metrics },
     { "net.rim.device.internal.system.InternalServices.getOSAPIVersion", os_api_version },
     { "net.rim.device.internal.applicationcontrol.ApplicationControlImpl.getModulePermissions", perm_long_all },
