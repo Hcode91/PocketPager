@@ -240,7 +240,7 @@ class BlackBerryActivity : Activity() {
                     .setTitle("Which module starts the app?")
                     .setItems(mains.toTypedArray()) { _, i ->
                         val set = prefs.getStringSet("apps", emptySet())!!.toMutableSet()
-                        set.add("${mains[i]}\t${mains[i]}")
+                        set.add("${prettyName(mains[i])}\t${mains[i]}")
                         prefs.edit().putStringSet("apps", set).apply()
                         Toast.makeText(this, "Added ${mains[i]}. Restarting the OS…", Toast.LENGTH_SHORT).show()
                         restart()
@@ -248,6 +248,14 @@ class BlackBerryActivity : Activity() {
                     .show()
             }
         }.start()
+    }
+
+    /** "Assassin_sCreed2_Blackberry9000_EN_IGP_EU_222" -> "Assassin sCreed2" */
+    private fun prettyName(module: String): String {
+        val cut = module.split('_').takeWhile { p ->
+            !p.lowercase().startsWith("blackberry") && !Regex("v?\\d{2,}.*|\\d+x\\d+|[A-Z]{2}").matches(p)
+        }
+        return cut.joinToString(" ").ifBlank { module }
     }
 
     /** New modules or a new OS need a fresh boot: restart this process. */
