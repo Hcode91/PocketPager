@@ -792,6 +792,57 @@ NAT(ei_getGIFImage) { UNUSED; return ei_decode(vm, a[0], a[1], a[2]); }
 NAT(ei_getJPEGImage) { UNUSED; return ei_decode(vm, a[0], a[1], 0); }
 NAT(ei_getBMPImage) { UNUSED; return ei_decode(vm, a[0], a[1], 0); }
 
+/* drawTexturedPath(int[] xPts, int[] yPts, byte[] types, int[] offsets,
+ * xOrigin, yOrigin, dux, dvx, duy, dvy, Bitmap texture): fill the polygon
+ * with the texture; texture coordinates (16.16) step by du/dv per pixel from
+ * the origin and wrap. Java ME's transformed drawRegion uses this. */
+NAT(g_drawTexturedPath) {
+    UNUSED; GC(c);
+    Obj *xs = vm_obj(vm, a[1]), *ys = vm_obj(vm, a[2]);
+    if (!xs || !ys || !xs->len || xs->len != ys->len) return NAT_OK;
+    Surf src, al;
+    if (!surf_bitmap(vm, a[11], &src) || src.w <= 0 || src.h <= 0) return NAT_OK;
+    Obj *bo = vm_obj(vm, a[11]);
+    int hasAlpha = surf_bitmap(vm, bo->d[B_ALPHA], &al);
+    int n = (int)xs->len;
+    int px[64], py[64];
+    if (n > 64) n = 64;
+    int x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
+    for (int i = 0; i < n; i++) {
+        px[i] = (int32_t)xs->d[i] + c.tx; py[i] = (int32_t)ys->d[i] + c.ty;
+        if (px[i] < x0) x0 = px[i]; if (px[i] > x1) x1 = px[i];
+        if (py[i] < y0) y0 = py[i]; if (py[i] > y1) y1 = py[i];
+    }
+    if (x0 < c.cx0) x0 = c.cx0; if (y0 < c.cy0) y0 = c.cy0;
+    if (x1 > c.cx1) x1 = c.cx1; if (y1 > c.cy1) y1 = c.cy1;
+    int ox = (int32_t)a[5] + c.tx, oy = (int32_t)a[6] + c.ty;
+    int64_t dux = (int32_t)a[7], dvx = (int32_t)a[8], duy = (int32_t)a[9], dvy = (int32_t)a[10];
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            /* even-odd test at the pixel centre */
+            int in = 0;
+            for (int i = 0, j = n - 1; i < n; j = i++) {
+                if ((py[i] * 2 > y * 2 + 1) != (py[j] * 2 > y * 2 + 1)) {
+                    int64_t num = (int64_t)(px[j] - px[i]) * (2 * y + 1 - 2 * py[i]);
+                    int64_t den = 2 * (int64_t)(py[j] - py[i]);
+                    int64_t xi2 = 2 * (int64_t)px[i] + (num * 2) / den;   /* 2*x of the edge */
+                    if (2 * x + 1 < xi2) in = !in;
+                }
+            }
+            if (!in) continue;
+            int64_t u = (x - ox) * dux + (y - oy) * duy, v = (x - ox) * dvx + (y - oy) * dvy;
+            int sx = (int)(u >> 16) % src.w, sy = (int)(v >> 16) % src.h;
+            if (sx < 0) sx += src.w;
+            if (sy < 0) sy += src.h;
+            uint32_t col = surf_get(&src, sx, sy);
+            int a8 = c.alpha;
+            if (hasAlpha) a8 = a8 * (int)surf_get(&al, sx, sy) / 255;
+            plot(&c, x, y, col, a8);
+        }
+    }
+    return NAT_OK;
+}
+
 /* drawImageInternal(x, y, w, h, EncodedImage, frame, left, top, decodeMode,
  * scaledWidth, scaledHeight): draw part of the image, scaled to the given size */
 NAT(g_drawImage) {
@@ -851,6 +902,7 @@ const NatEnt kNativesGfx[] = {
     { "net.rim.device.api.ui.Graphics.pushRegion(Lnet.rim.device.api.ui.XYRect;)", g_pushRegionR },
     { "net.rim.device.api.ui.Graphics.popContext", g_popContext },
     { "net.rim.device.api.ui.Graphics.drawImageInternal", g_drawImage },
+    { "net.rim.device.api.ui.Graphics.drawTexturedPath", g_drawTexturedPath },
     { "net.rim.device.api.ui.Graphics.fillRect(IIII)", g_fillRect },
     { "net.rim.device.api.ui.Graphics.fillRect32", g_fillRect32 },
     { "net.rim.device.api.ui.Graphics.drawRect(IIII)", g_drawRect },

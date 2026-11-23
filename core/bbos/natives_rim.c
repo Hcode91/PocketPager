@@ -374,7 +374,14 @@ NAT(is_isDeviceCapable) {
     int known = 0;
     for (int i = 0; i < nseen; i++) if (seen[i] == a[0]) known = 1;
     if (!known && nseen < 64) { seen[nseen++] = a[0]; if (vm->trace & 4) vm_log(vm, "isDeviceCapable(%d)", (int)a[0]); }
-    ret[0] = 0;
+    /* ids from their callers: 1 USB port, 4 removable battery, 9 buzzer,
+     * 11 multicolour LED, 18 trackball, 23 LED. Radios (GPS 6, Bluetooth 8),
+     * camera 21, touch 26/30, accelerometer 27 and optical trackball 31 stay
+     * off: we don't emulate them. */
+    switch ((int)a[0]) {
+    case 1: case 4: case 9: case 11: case 18: case 23: ret[0] = 1; break;
+    default: ret[0] = 0;
+    }
     return NAT_OK;
 }
 NAT(is_catastrophicFailure) {

@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
             if (j) snprintf(nm, sizeof nm, "%s-%d", fam, j); else snprintf(nm, sizeof nm, "%s", fam);
             BBModule *m = vm_module(vm, nm);
             if (!m) { if (j) break; continue; }
-            for (int c = 0; c < m->ncls; c++) printf("%s %s\n", nm, m->cls[c].name);
+            for (int c = 0; c < m->ncls; c++) printf("%s %s\n", nm, m->cls[c].full ? m->cls[c].full : m->cls[c].name);
         }
         return 0;
     }
