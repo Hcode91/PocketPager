@@ -34,6 +34,15 @@ NAT(arr_getSectionSize) { UNUSED; Obj *o = vm_obj(vm, a[0]); int es = o ? vm_ele
 NAT(mem_objectToInt) { UNUSED; ret[0] = a[0]; return NAT_OK; }
 NAT(mem_intToObject) { UNUSED; ret[0] = vm_obj(vm, a[0]) ? a[0] : 0; return NAT_OK; }
 NAT(mem_big) { UNUSED; ret[0] = 16u << 20; return NAT_OK; }
+/* module handles run 1..n (natives_rim); the OS sizes tables by this, so
+ * keep it near the real figure rather than "big" */
+NAT(mem_maxCodeSections) {
+    UNUSED;
+    int n = nat_module_count(vm) + 1;
+    n = (n + 1023) & ~1023;
+    ret[0] = (uint32_t)(n < 4096 ? 4096 : n);
+    return NAT_OK;
+}
 NAT(mem_zero) { UNUSED; ret[0] = 0; return NAT_OK; }
 NAT(mem_one) { UNUSED; ret[0] = 1; return NAT_OK; }
 NAT(mem_nop) { UNUSED; return NAT_OK; }
@@ -325,7 +334,7 @@ const NatEnt kNativesVm[] = {
     { "net.rim.vm.Memory.getRAMReady", mem_big },
     { "net.rim.vm.Memory.getMaxHeap", mem_big },
     { "net.rim.vm.Memory.getMaxGroupSize", mem_big },
-    { "net.rim.vm.Memory.getMaxNumCodeSections", mem_big },
+    { "net.rim.vm.Memory.getMaxNumCodeSections", mem_maxCodeSections },
     { "net.rim.vm.Memory.getGCGeneration", mem_zero },
     { "net.rim.vm.Memory.objectSize", mem_objectSize },
     { "net.rim.vm.Memory.objectFlashSize", mem_objectSize },

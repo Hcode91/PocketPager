@@ -26,6 +26,7 @@ typedef struct NatState {
 
 NatState *nat_state(BBVM *vm);
 uint64_t nat_now(BBVM *vm);
+int nat_module_count(BBVM *vm);
 int nat_module_handle(BBVM *vm, const char *name);
 BBModule *nat_module_by_handle(BBVM *vm, int h);
 Proc *nat_proc(BBVM *vm, int pid);

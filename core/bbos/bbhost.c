@@ -8,6 +8,7 @@
 #include "vm.h"
 #include "natives.h"
 #include "bbgfx.h"
+#include "bbsnap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,4 +167,40 @@ void bbh_trackball(int dx, int dy) {
 void bbh_click(int down) {
     if (!g_vm) return;
     nat_post_message(g_vm, DEV_NAV, down ? NAV_CLICK : NAV_UNCLICK, 0, 0x20000000, bbh_uptime(), 0, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* save states                                                          */
+
+static const char kBuild[] = "bbos " __DATE__ " " __TIME__;
+
+typedef struct SnapExtra { int64_t uptime; } SnapExtra;
+
+/* slots share one base file in their folder */
+static void base_path(const char *slot, char *out, size_t n) {
+    const char *sl = strrchr(slot, '/');
+    if (sl) snprintf(out, n, "%.*s/base.bbsnap", (int)(sl - slot), slot);
+    else snprintf(out, n, "base.bbsnap");
+}
+
+int bbh_save(const char *path, char *err, size_t errn) {
+    if (!g_vm) { snprintf(err, errn, "the OS is not running"); return -1; }
+    if (!g_booted) { snprintf(err, errn, "wait until the OS has started"); return -1; }
+    SnapExtra x = { bbh_uptime() };
+    char base[1100];
+    base_path(path, base, sizeof base);
+    return bbsnap_save(path, base, (const void *)bbh_start, kBuild, &x, sizeof x, err, errn);
+}
+
+int bbh_load(const char *path, char *err, size_t errn) {
+    SnapExtra x = { 0 };
+    char base[1100];
+    base_path(path, base, sizeof base);
+    int rc = bbsnap_load(path, base, (const void *)bbh_start, kBuild, &x, sizeof x, err, errn);
+    if (rc < 0) return rc;
+    /* the saved clock anchor belongs to the old process: carry on from the
+     * uptime the state was saved at */
+    if (g_booted) g_realAtBoot = real_ms() - ((uint64_t)x.uptime - g_bootMs);
+    snprintf(g_status, sizeof g_status, "ready");
+    return 0;
 }

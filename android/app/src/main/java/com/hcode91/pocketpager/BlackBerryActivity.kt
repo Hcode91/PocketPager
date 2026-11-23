@@ -132,6 +132,7 @@ class BlackBerryActivity : Activity() {
             button(root, "▶  $label") { play(label, module) }
         }
         note(root, "")
+        if ((1..SLOTS).any { slotFile(it).exists() }) button(root, "Load a save…") { pickSlot(false, null) }
         button(root, "Add apps (.cod or .zip)") { pick(REQ_APPS) }
         button(root, "Re-import the OS installer") { pick(REQ_OS) }
         button(root, "Back to the RIM pagers") {
@@ -148,6 +149,65 @@ class BlackBerryActivity : Activity() {
             statusLine?.text = if (m.stopped) "Stopped · $s" else if (!m.booted) "Starting the OS… $s" else s
             ui.postDelayed(this, 400)
         }
+    }
+
+    // ---- save states ------------------------------------------------------
+
+    private val statesDir by lazy { File(filesDir, "bbos/states").apply { mkdirs() } }
+    private fun slotFile(n: Int) = File(statesDir, "slot$n.bbsnap")
+    private fun slotLabel(n: Int): String {
+        val f = slotFile(n)
+        if (!f.exists()) return "Slot $n · empty"
+        val game = prefs.getString("slot$n", null) ?: "Saved"
+        val time = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(f.lastModified()))
+        return "Slot $n · $game · $time"
+    }
+
+    /** Save to or load from one of the slots. `game` names what is playing. */
+    private fun pickSlot(save: Boolean, game: String?) {
+        val slots = (1..SLOTS).filter { save || slotFile(it).exists() }
+        if (slots.isEmpty()) { Toast.makeText(this, "No saves yet", Toast.LENGTH_SHORT).show(); return }
+        AlertDialog.Builder(this)
+            .setTitle(if (save) "Save to…" else "Load…")
+            .setItems(slots.map { slotLabel(it) }.toTypedArray()) { _, i ->
+                val n = slots[i]
+                if (save) saveSlot(n, game) else loadSlot(n)
+            }
+            .show()
+    }
+
+    private fun saveSlot(n: Int, game: String?) {
+        val m = machine ?: return
+        val first = !File(statesDir, "base.bbsnap").exists()
+        Toast.makeText(this, if (first) "Saving… (the first save also stores the OS, so it takes longer)" else "Saving…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val err = m.saveState(slotFile(n).path)
+            ui.post {
+                if (err == null) {
+                    prefs.edit().putString("slot$n", game ?: "Saved").commit()
+                    Toast.makeText(this, "Saved to slot $n", Toast.LENGTH_SHORT).show()
+                } else Toast.makeText(this, "Couldn't save: $err", Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
+    private fun loadSlot(n: Int) {
+        val m = machine ?: return
+        val game = prefs.getString("slot$n", null) ?: "Saved game"
+        Toast.makeText(this, "Loading…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val err = m.loadState(slotFile(n).path)
+            ui.post {
+                when {
+                    err == null -> showDevice(game)
+                    err.contains("must restart") -> {
+                        Toast.makeText(this, "Couldn't load: $err", Toast.LENGTH_LONG).show()
+                        restart()
+                    }
+                    else -> Toast.makeText(this, "Couldn't load: $err", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     // ---- importing --------------------------------------------------------
@@ -319,10 +379,12 @@ class BlackBerryActivity : Activity() {
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         statusLine = TextView(this).apply { textSize = 11f; setTextColor(Color.rgb(0x9A, 0xA4, 0xB0)); text = label }
         bar.addView(statusLine, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(Button(this).apply {
-            text = "Games"; isAllCaps = false; textSize = 12f
-            setOnClickListener { showLibrary() }
-        })
+        for ((t, act) in listOf("Save" to { pickSlot(true, label) }, "Load" to { pickSlot(false, label) }, "Games" to { showLibrary() })) {
+            bar.addView(Button(this).apply {
+                text = t; isAllCaps = false; textSize = 12f
+                setOnClickListener { act() }
+            })
+        }
         root.addView(bar)
 
         screen = BbScreenView(this).apply { machine = m }
@@ -492,5 +554,6 @@ class BlackBerryActivity : Activity() {
         private const val REQ_OS = 11
         private const val REQ_APPS = 12
         const val POCKET_LAUNCH = "com.hcode91.pocket.LAUNCH_GAME"
+        private const val SLOTS = 4
     }
 }

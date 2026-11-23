@@ -40,6 +40,8 @@ uint64_t nat_now(BBVM *vm) {
     return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+int nat_module_count(BBVM *vm) { return nat_state(vm)->nmods; }
+
 int nat_module_handle(BBVM *vm, const char *name) {
     NatState *s = nat_state(vm);
     int lo = 0, hi = s->nmods - 1;

@@ -98,11 +98,17 @@ static BBModule *load_module(BBVM *vm, const char *name) {
     for (int i = 0; i < vm->ndirs; i++) {
         char path[1024];
         snprintf(path, sizeof path, "%s/%s.cod", vm->dirs[i], name);
-        size_t n; uint8_t *b = slurp(path, &n);
+        size_t n;
+#ifdef BBARENA_H
+        /* module files go where save states can re-read them from disk */
+        uint8_t *b = bb_code_load(path, &n, COD_PAD);
+#else
+        uint8_t *b = slurp(path, &n);
+#endif
         if (!b) continue;
         char err[256];
         BBModule *m = cod_parse(name, b, n, err, sizeof err);
-        if (!m) { vm_log(vm, "load %s: %s", name, err); free(b); return NULL; }
+        if (!m) { vm_log(vm, "load %s: %s", name, err); return NULL; }
         m->next = vm->mods; vm->mods = m;
         m->gidx = vm->nmodsG++;
         for (int c = 0; c < m->ncls; c++) m->cls[c].gidx = vm->nclsG++;

@@ -26,4 +26,9 @@ enum { BBH_KEY_ESCAPE = 27, BBH_KEY_ENTER = 10, BBH_KEY_BACKSPACE = 8, BBH_KEY_D
 void bbh_key(int ch, int action, int status);
 void bbh_trackball(int dx, int dy);
 void bbh_click(int down);
+
+/* Save states: the whole OS (memory, threads, screen). Loading works in a
+ * fresh process or a running one; the file must come from the same build. */
+int bbh_save(const char *path, char *err, size_t errn);
+int bbh_load(const char *path, char *err, size_t errn);
 #endif

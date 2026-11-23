@@ -810,11 +810,15 @@ NAT(g_drawTexturedPath) {
     int x0 = 1 << 30, y0 = 1 << 30, x1 = -(1 << 30), y1 = -(1 << 30);
     for (int i = 0; i < n; i++) {
         px[i] = (int32_t)xs->d[i] + c.tx; py[i] = (int32_t)ys->d[i] + c.ty;
-        if (px[i] < x0) x0 = px[i]; if (px[i] > x1) x1 = px[i];
-        if (py[i] < y0) y0 = py[i]; if (py[i] > y1) y1 = py[i];
+        if (px[i] < x0) x0 = px[i];
+        if (px[i] > x1) x1 = px[i];
+        if (py[i] < y0) y0 = py[i];
+        if (py[i] > y1) y1 = py[i];
     }
-    if (x0 < c.cx0) x0 = c.cx0; if (y0 < c.cy0) y0 = c.cy0;
-    if (x1 > c.cx1) x1 = c.cx1; if (y1 > c.cy1) y1 = c.cy1;
+    if (x0 < c.cx0) x0 = c.cx0;
+    if (y0 < c.cy0) y0 = c.cy0;
+    if (x1 > c.cx1) x1 = c.cx1;
+    if (y1 > c.cy1) y1 = c.cy1;
     int ox = (int32_t)a[5] + c.tx, oy = (int32_t)a[6] + c.ty;
     int64_t dux = (int32_t)a[7], dvx = (int32_t)a[8], duy = (int32_t)a[9], dvy = (int32_t)a[10];
     for (int y = y0; y < y1; y++) {

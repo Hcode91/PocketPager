@@ -2,6 +2,7 @@
  *   bbrun -d dir [-d dir...] [-t mask] family class [method] */
 #include "../core/bbos/vm.h"
 #include "../core/bbos/natives.h"
+#include "../core/bbos/bbsnap.h"
 #include "../core/bbos/bbgfx.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,9 @@
 static BBVM *g_vm;
 static uint64_t g_idleMs, g_epoch = 1262304000000ull;   /* 2010-01-01 */
 static uint64_t virt_now(void *ctx) { (void)ctx; return g_epoch + (uint64_t)g_vm->icount / 25000 + g_idleMs; }
+
+/* the VM, kept in a variable that save states carry */
+static BBVM *g_runVm;
 
 static void save_screen(const char *out) {
     int w, h, fr;
@@ -59,18 +63,36 @@ static void run_input(BBVM *vm, const char *act) {
     else if (!strcmp(act, "down")) post_nav(vm, NAV_MOVE, 0, 1);
     else if (!strcmp(act, "left")) post_nav(vm, NAV_MOVE, -8, 0);
     else if (!strcmp(act, "right")) post_nav(vm, NAV_MOVE, 8, 0);
-    else if (!strcmp(act, "shot")) { char p[64]; snprintf(p, sizeof p, "/tmp/bbshot%d.ppm", nshot++); save_screen(p); }
+    else if (!strcmp(act, "shot")) {
+        /* numbered by the files already there: a loaded state must not reuse names */
+        char p[64];
+        for (nshot = 0;; nshot++) { snprintf(p, sizeof p, "/tmp/bbshot%d.ppm", nshot); FILE *e = fopen(p, "rb"); if (!e) break; fclose(e); }
+        save_screen(p);
+    }
+    else if (!strcmp(act, "save") || !strcmp(act, "load")) {
+        char err[200] = "";
+        int rc = act[0] == 's' ? bbsnap_save("/tmp/bbstate.gz", "/tmp/bbbase.gz", (const void *)run_input, "bbrun", NULL, 0, err, sizeof err)
+                               : bbsnap_load("/tmp/bbstate.gz", "/tmp/bbbase.gz", (const void *)run_input, "bbrun", NULL, 0, err, sizeof err);
+        fprintf(stderr, "%s: %s\n", act, rc ? err : "ok");
+        size_t raw = 0; int nm = 0;
+        for (BBModule *m = vm->mods; m; m = m->next) { raw += m->rawSize + 70000; nm++; }
+        long objs = 0; for (uint32_t k = 0; k < vm->nobjs; k++) if (vm->objs[k]) objs++;
+        { extern size_t bb_arena_free_bytes(void); fprintf(stderr, "free in arena %zu MB heap %zu MB\n", bb_arena_free_bytes() >> 20, (size_t)vm->heapBytes >> 20); }
+        fprintf(stderr, "arena %zu MB, %d modules %zu MB, %ld objects\n", bb_arena_used() >> 20, nm, raw >> 20, objs);
+    }
     else if (act[0] == 'k' && act[1]) post_key(vm, (unsigned char)act[1]);
     fprintf(stderr, "input: %s\n", act);
 }
 
 int main(int argc, char **argv) {
     BBVM *vm = vm_new();
+    g_runVm = vm;
     g_vm = vm;
     if (!getenv("BBREALTIME")) vm->host.nowMs = virt_now;
     vm->traceFilter = getenv("BBTRACE");
     int i = 1;
     long long budget = 50000000;
+    const char *inp = NULL; int sinceInput = 0;   /* locals: a loaded state must not rewind the script */
     int idleIters = 0, idleMax = 200000;
     while (i < argc && argv[i][0] == '-') {
         if (!strcmp(argv[i], "-d") && i + 1 < argc) vm_add_dir(vm, argv[++i]);
@@ -213,8 +235,6 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "foreground pid %d -> %d\n", pid, rc2);
                 } else fprintf(stderr, "foreground: %s not running\n", lm);
             }
-            static const char *inp;
-            static int sinceInput;
             if (!inp) inp = getenv("BBINPUT");
             sinceInput++;
             if (inp && *inp && (!lm || fronted)) {
@@ -227,6 +247,7 @@ int main(int argc, char **argv) {
                     for (c++; *c && *c != ',' && k < 31; c++) act[k++] = *c;
                     act[k] = 0;
                     run_input(vm, act);
+                    vm = g_runVm;   /* a loaded state brings its own VM */
                     idleIters = 0;
                     inp = *c == ',' ? c + 1 : c;
                 }

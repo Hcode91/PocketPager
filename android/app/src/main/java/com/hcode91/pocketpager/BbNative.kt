@@ -42,6 +42,10 @@ object BbNative {
     @JvmStatic external fun trackball(dx: Int, dy: Int)
     @JvmStatic external fun click(down: Boolean)
 
+    /** Save states: null when it worked, otherwise a message for the user. */
+    @JvmStatic external fun saveState(path: String): String?
+    @JvmStatic external fun loadState(path: String): String?
+
     const val SCREEN_W = 480
     const val SCREEN_H = 320
 }

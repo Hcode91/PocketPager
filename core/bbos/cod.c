@@ -230,11 +230,19 @@ BBModule *cod_parse(const char *name, uint8_t *buf, size_t size, char *err, size
     if (size < 44 || rd32(buf) != 0xffffc0deu) { fail(err, errn, "%s: not a cod module", name); return NULL; }
     BBModule *m = calloc(1, sizeof *m);
     snprintf(m->name, sizeof m->name, "%s", name);
-    /* pad the image so that malformed tables cannot read past the end */
-    uint8_t *pb = realloc(buf, size + 70000);
-    if (!pb) { free(m); fail(err, errn, "%s: out of memory", name); return NULL; }
-    memset(pb + size, 0, 70000);
-    buf = pb;
+    /* pad the image so that malformed tables cannot read past the end
+     * (files loaded into the module region come padded already) */
+#ifdef BBARENA_H
+    int owned = bb_code_owns(buf);
+#else
+    int owned = 0;
+#endif
+    if (!owned) {
+        uint8_t *pb = realloc(buf, size + COD_PAD);
+        if (!pb) { free(m); fail(err, errn, "%s: out of memory", name); return NULL; }
+        memset(pb + size, 0, COD_PAD);
+        buf = pb;
+    }
     m->raw = buf; m->rawSize = size;
     m->version = rd16(buf + 36);
     m->codeSize = rd16(buf + 38);
@@ -402,6 +410,10 @@ void cod_free(BBModule *m) {
         free(k->ifaces); free(k->vtable);
     }
     free(m->cls); free(m->routines); free(m->crefs); free(m->crefOff); free(m->mrefs);
-    free(m->fix); free(m->modNameOff); free(m->mods); free(m->statics); free(m->raw);
+    free(m->fix); free(m->modNameOff); free(m->mods); free(m->statics);
+#ifdef BBARENA_H
+    if (!bb_code_owns(m->raw))
+#endif
+    free(m->raw);
     free(m);
 }

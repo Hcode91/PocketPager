@@ -117,6 +117,26 @@ class BbMachine(private val osDir: String) {
         }
     }
 
+    // ---- save states --------------------------------------------------------
+
+    /** Saves the whole device; null when it worked, else a message. */
+    fun saveState(path: String): String? = synchronized(lock) {
+        if (!booted) return "Wait until the OS has started"
+        BbNative.saveState(path)
+    }
+
+    /** Replaces the running device with a saved one; null when it worked. */
+    fun loadState(path: String): String? = synchronized(lock) {
+        val err = BbNative.loadState(path)
+        if (err == null) {
+            booted = BbNative.booted()
+            pendingLaunch = null
+            launchState = ""
+            lastFrame = -1
+        }
+        err
+    }
+
     // ---- input ------------------------------------------------------------
 
     fun key(ch: Int, action: Int, status: Int = 0) = synchronized(lock) { BbNative.key(ch, action, status) }

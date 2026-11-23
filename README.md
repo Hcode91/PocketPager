@@ -48,6 +48,10 @@ plays; other built-in games are in progress.
    latch for the next key). A gamepad or keyboard works too: D-pad rolls,
    A presses the trackball, B is Escape, Start is Menu.
 4. **Add apps** takes more `.cod` files or a `.zip` of them.
+5. **Save** / **Load** (top bar while playing) keep four save slots. The
+   first save also writes a shared base file (about 75 MB); each slot then
+   holds only what differs from it, usually well under 1 MB. Saves belong
+   to the app build that made them: after an update, older ones won't load.
 
 Tools for this family: `tools/bbimport` (unpack an installer:
 `bbimport installer.exe outdir`), `tools/bbrun` (boot headlessly:

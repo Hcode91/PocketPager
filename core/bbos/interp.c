@@ -192,6 +192,7 @@ static int is_native_routine(BBRoutine *r) {
 static int push_frame(BBVM *vm, Thread *t, BBRoutine *r, uint32_t *args) {
     if (!r->prep) r->prep = prepare(vm, r);
     Prep *p = r->prep;
+    if (!t->stack) return 0;   /* a finished thread */
     if (t->nfr >= t->maxfr || args + p->nlocals + 512 > t->stackEnd) {
         vm_throw(vm, t, "java.lang.StackOverflowError", NULL);
         return 0;
@@ -1244,7 +1245,19 @@ static void thread_finished(BBVM *vm, Thread *t, int rc) {
 
 /* Run all threads for up to budget instructions. Returns the number of
  * runnable threads left (0 = everything idle or dead). */
+/* finished threads keep their Thread record (others may point at it) but
+ * give back their stack and frames */
+static void release_dead(BBVM *vm) {
+    for (Thread *t = vm->threads; t; t = t->next)
+        if (t->state == TS_DEAD && t->stack && t != vm->cur) {
+            free(t->stack); free(t->fr);
+            t->stack = t->stackEnd = NULL; t->fr = NULL;
+            t->nfr = 0; t->maxfr = 0;
+        }
+}
+
 int vm_run(BBVM *vm, long long budget) {
+    release_dead(vm);
     while (budget > 0 && !vm->fatal) {
         wake(vm);
         int ran = 0;
