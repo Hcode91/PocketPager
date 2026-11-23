@@ -22,6 +22,7 @@ typedef struct Imp {
     void *ctx;
     char *err; size_t errn;
     int written;
+    char *names; size_t namesn;   /* applications found: names without a -N suffix, comma separated */
 } Imp;
 
 static uint16_t r16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -66,6 +67,21 @@ static int write_cod(Imp *im, const char *name, const uint8_t *p, size_t n) {
     fclose(f);
     if (w != n) return fail(im, "cannot write %s (disk full?)", path);
     im->written++;
+    /* an application's own module has no "-N" sibling suffix */
+    const char *dash = strrchr(name, '-');
+    int sibling = dash && dash[1];
+    for (const char *p = dash ? dash + 1 : NULL; sibling && p && *p; p++) if (*p < '0' || *p > '9') sibling = 0;
+    if (im->names && !sibling) {
+        size_t l = strlen(im->names), nl = strlen(name);
+        char key[140];
+        snprintf(key, sizeof key, ",%s,", name);
+        char cur[4096];
+        snprintf(cur, sizeof cur, ",%s,", im->names);
+        if (!strstr(cur, key) && l + nl + 2 < im->namesn) {
+            if (l) strcat(im->names, ",");
+            strcat(im->names, name);
+        }
+    }
     return 0;
 }
 
@@ -379,7 +395,7 @@ static int do_exe(Imp *im, const char *exe, const char *tmpMsi) {
 
 int bbimport_installer(const char *exe, const char *outDir, const char *tmpDir,
                        bbimport_progress cb, void *ctx, char *err, size_t errn) {
-    Imp im = { outDir, cb, ctx, err, errn, 0 };
+    Imp im = { outDir, cb, ctx, err, errn, 0, NULL, 0 };
     char msi[1024], cab[1024];
     snprintf(msi, sizeof msi, "%s/bbimport.msi", tmpDir);
     snprintf(cab, sizeof cab, "%s/bbimport.cab", tmpDir);
@@ -398,8 +414,9 @@ int bbimport_installer(const char *exe, const char *outDir, const char *tmpDir,
 
 /* Add loose modules: a .cod (single or a zip of siblings) or a .zip / .jad
  * bundle containing .cod files. */
-int bbimport_modules(const char *path, const char *outDir, char *err, size_t errn) {
-    Imp im = { outDir, NULL, NULL, err, errn, 0 };
+int bbimport_modules(const char *path, const char *outDir, char *names, size_t namesn, char *err, size_t errn) {
+    Imp im = { outDir, NULL, NULL, err, errn, 0, names, namesn };
+    if (names && namesn) names[0] = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return fail(&im, "cannot open %s", path);
     fseek(f, 0, SEEK_END);

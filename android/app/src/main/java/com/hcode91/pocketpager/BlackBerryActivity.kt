@@ -169,17 +169,22 @@ class BlackBerryActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
+            if (req == REQ_APPS) putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }, req)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
+        if (resultCode != RESULT_OK || data == null) return
         when (requestCode) {
-            REQ_OS -> importOs(uri)
-            REQ_APPS -> importApps(uri)
+            REQ_OS -> data.data?.let { importOs(it) }
+            REQ_APPS -> {
+                val uris = mutableListOf<Uri>()
+                data.clipData?.let { c -> for (i in 0 until c.itemCount) uris.add(c.getItemAt(i).uri) }
+                if (uris.isEmpty()) data.data?.let { uris.add(it) }
+                if (uris.isNotEmpty()) importApps(uris)
+            }
         }
     }
 
@@ -220,34 +225,52 @@ class BlackBerryActivity : Activity() {
         }.start()
     }
 
-    private fun importApps(uri: Uri) {
+    /**
+     * Adds a game from a .zip of .cod files, or from .cod files picked
+     * together. The game's own module (the one without a "-N" suffix) is
+     * found from the files themselves.
+     */
+    private fun importApps(uris: List<Uri>) {
+        Toast.makeText(this, "Adding…", Toast.LENGTH_SHORT).show()
         Thread {
-            val before = osDir.list()?.toSet() ?: emptySet()
-            val result = try {
-                val f = copyToCache(uri, "app.bin")
-                BbNative.importModules(f.path, osDir.path).also { f.delete() }
-            } catch (e: Exception) { "error:${e.message}" }
-            val added = (osDir.list()?.toSet() ?: emptySet()) - before
-            // the application is the module without a "-N" sibling suffix
-            val mains = added.map { it.removeSuffix(".cod") }.filter { !Regex("-\\d+$").matches(it) }.sorted()
+            val found = linkedSetOf<String>()
+            var error: String? = null
+            var modules = 0
+            for ((i, uri) in uris.withIndex()) {
+                val result = try {
+                    val f = copyToCache(uri, "app$i.bin")
+                    BbNative.importModules(f.path, osDir.path).also { f.delete() }
+                } catch (e: Exception) { "error:${e.message}" }
+                if (result.startsWith("ok:")) {
+                    val parts = result.split(':', limit = 3)
+                    modules += parts.getOrNull(1)?.toIntOrNull() ?: 0
+                    parts.getOrNull(2)?.split(',')?.filter { it.isNotBlank() }?.let { found.addAll(it) }
+                } else if (error == null) error = result.removePrefix("error:")
+            }
+            val apps = found.toList()
             ui.post {
-                if (!result.startsWith("ok:")) {
-                    Toast.makeText(this, result.removePrefix("error:"), Toast.LENGTH_LONG).show()
-                    return@post
+                when {
+                    modules == 0 -> Toast.makeText(this, error ?: "No BlackBerry modules (.cod) found", Toast.LENGTH_LONG).show()
+                    apps.isEmpty() -> Toast.makeText(this,
+                        "Added $modules modules, but not the game's main one. Pick the whole .zip, or all its .cod files " +
+                            "(including the one without a -number).", Toast.LENGTH_LONG).show()
+                    apps.size == 1 -> addApp(apps[0])
+                    else -> AlertDialog.Builder(this)
+                        .setTitle("Which one is the game?")
+                        .setItems(apps.toTypedArray()) { _, k -> addApp(apps[k]) }
+                        .show()
                 }
-                if (mains.isEmpty()) { Toast.makeText(this, "Modules updated", Toast.LENGTH_SHORT).show(); return@post }
-                AlertDialog.Builder(this)
-                    .setTitle("Which module starts the app?")
-                    .setItems(mains.toTypedArray()) { _, i ->
-                        val set = prefs.getStringSet("apps", emptySet())!!.toMutableSet()
-                        set.add("${prettyName(mains[i])}\t${mains[i]}")
-                        prefs.edit().putStringSet("apps", set).apply()
-                        Toast.makeText(this, "Added ${mains[i]}. Restarting the OS…", Toast.LENGTH_SHORT).show()
-                        restart()
-                    }
-                    .show()
             }
         }.start()
+    }
+
+    private fun addApp(module: String) {
+        val set = prefs.getStringSet("apps", emptySet())!!.filter { !it.endsWith("\t$module") }.toMutableSet()
+        set.add("${prettyName(module)}\t$module")
+        // commit (not apply): the process restarts straight after
+        prefs.edit().putStringSet("apps", set).commit()
+        Toast.makeText(this, "Added ${prettyName(module)}. Restarting the OS…", Toast.LENGTH_SHORT).show()
+        restart()
     }
 
     /** "Assassin_sCreed2_Blackberry9000_EN_IGP_EU_222" -> "Assassin sCreed2" */

@@ -10,7 +10,9 @@ typedef void (*bbimport_progress)(void *ctx, const char *what, int percent);
 int bbimport_installer(const char *exe, const char *outDir, const char *tmpDir,
                        bbimport_progress cb, void *ctx, char *err, size_t errn);
 
-/* Add modules from a .cod file or a .zip of them. Returns the count or -1. */
-int bbimport_modules(const char *path, const char *outDir, char *err, size_t errn);
+/* Add modules from a .cod file or a .zip of them. Returns the count or -1;
+ * names receives the applications found (modules without a -N suffix),
+ * comma separated. */
+int bbimport_modules(const char *path, const char *outDir, char *names, size_t namesn, char *err, size_t errn);
 
 #endif

@@ -44,12 +44,13 @@ JNIEXPORT jstring JNICALL FN(importProgress)(JNIEnv *env, jclass c) {
 JNIEXPORT jstring JNICALL FN(importModules)(JNIEnv *env, jclass c, jstring path, jstring out) {
     const char *p = (*env)->GetStringUTFChars(env, path, 0);
     const char *o = (*env)->GetStringUTFChars(env, out, 0);
-    char err[300] = "";
-    int n = bbimport_modules(p, o, err, sizeof err);
+    char err[300] = "", names[2048] = "";
+    int n = bbimport_modules(p, o, names, sizeof names, err, sizeof err);
     (*env)->ReleaseStringUTFChars(env, path, p);
     (*env)->ReleaseStringUTFChars(env, out, o);
-    char res[340];
-    if (n < 0) snprintf(res, sizeof res, "error:%s", err); else snprintf(res, sizeof res, "ok:%d", n);
+    char res[2400];
+    /* "ok:count:app1,app2" or "error:message" */
+    if (n < 0) snprintf(res, sizeof res, "error:%s", err); else snprintf(res, sizeof res, "ok:%d:%s", n, names);
     return str(env, res);
 }
 
